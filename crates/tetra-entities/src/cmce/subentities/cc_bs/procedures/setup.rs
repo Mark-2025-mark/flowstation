@@ -312,13 +312,19 @@ impl CcBsSubentity {
         let dest_gssi = dest_gssi as u32;
         let dest_addr = TetraAddress::new(dest_gssi, SsiType::Gssi);
 
-        if !self.has_listener(dest_gssi) {
+        if !self.has_listener(dest_gssi) && !self.is_echolink_outbound_group_destination(dest_gssi) {
             tracing::info!(
                 "CMCE: rejecting U-SETUP from issi={} to gssi={} (no listeners)",
                 calling_party.ssi,
                 dest_gssi
             );
             return;
+        } else if !self.has_listener(dest_gssi) {
+            tracing::info!(
+                "CMCE: accepting U-SETUP from issi={} to EchoLink gssi={} without registry listeners",
+                calling_party.ssi,
+                dest_gssi
+            );
         }
 
         if is_emergency_priority(pdu.call_priority) {
@@ -561,9 +567,13 @@ impl CcBsSubentity {
         let asterisk_can_route = self.config.config().asterisk.enabled;
         #[cfg(not(feature = "asterisk"))]
         let asterisk_can_route = false;
-        if !is_issi_address && !brew::is_active(&self.config) && !asterisk_can_route {
+        if !is_issi_address
+            && !brew::is_active(&self.config)
+            && !asterisk_can_route
+            && !self.config.effective_echolink().enabled
+        {
             tracing::warn!(
-                "U-SETUP P2P with non-ISSI called_party_type_identifier={} (rejecting, Brew/Asterisk disabled)",
+                "U-SETUP P2P with non-ISSI called_party_type_identifier={} (rejecting, no network bridge enabled)",
                 pdu.called_party_type_identifier
             );
             self.reject_setup_request(
@@ -571,7 +581,7 @@ impl CcBsSubentity {
                 message,
                 calling_party,
                 DisconnectCause::RequestedServiceNotAvailable,
-                "non-ISSI destination requires Brew or Asterisk",
+                "non-ISSI destination requires Brew, Asterisk or EchoLink",
             );
             return;
         }
@@ -898,7 +908,10 @@ impl CcBsSubentity {
         };
         let mut network_call = Self::build_network_circuit_call_from_u_setup(pdu, calling_party.ssi);
 
-        // Treat short service ISSIs as dial strings before choosing a network bridge.
+        // Merge note (#35 + #36): unified network-routing preamble. First normalise a short service
+        // ISSI into a dial string (#35 dial-string handling), then pick the bridge entity in priority
+        // order — Asterisk, EchoLink (#36), then the per-source-ISSI Brew/Brew2 partition (#35), else
+        // reject. NEEDS REVIEW: the Asterisk > EchoLink > Brew/Brew2 priority is a design choice.
         if network_call.destination > 0 && network_call.destination < 1_000_000 && network_call.number.is_empty() {
             network_call.number = network_call.destination.to_string();
             network_call.destination = 0;
@@ -910,8 +923,16 @@ impl CcBsSubentity {
         #[cfg(not(feature = "asterisk"))]
         let asterisk_number: Option<String> = None;
 
+        let echolink_target = if asterisk_number.is_none() {
+            self.echolink_route_target(&network_call)
+        } else {
+            None
+        };
+
         let network_entity = if asterisk_number.is_some() {
             TetraEntity::Asterisk
+        } else if echolink_target.is_some() {
+            TetraEntity::Echolink
         } else if let Some(entity) = brew::route_entity_for_local_issi(&self.config, calling_party.ssi) {
             entity
         } else {
@@ -939,6 +960,17 @@ impl CcBsSubentity {
             network_call.number = number;
             network_call.destination = 0;
             network_call.duplex = 1;
+        } else if let Some(target) = echolink_target {
+            tracing::info!(
+                "CMCE: routing U-SETUP src={} dialed='{}' to EchoLink target='{}'",
+                calling_party.ssi,
+                network_call.number,
+                target
+            );
+            network_call.number = target;
+            network_call.destination = 0;
+            network_call.duplex = 0;
+            network_call.communication = CommunicationType::P2Mp.into_raw() as u8;
         } else if !brew::is_active_for_entity(&self.config, network_entity) {
             tracing::info!(
                 "CMCE: rejecting U-SETUP P2P from ISSI {} ({:?} disabled, called_ssi={})",
@@ -1010,7 +1042,7 @@ impl CcBsSubentity {
         }
 
         let has_external_called_party = Self::has_external_called_party(pdu, &network_call);
-        let destination_routable = network_entity == TetraEntity::Asterisk
+        let destination_routable = matches!(network_entity, TetraEntity::Asterisk | TetraEntity::Echolink)
             || network_call.destination == 0
             || brew::is_brew_issi_routable_for_entity(&self.config, network_entity, network_call.destination);
 
@@ -1040,13 +1072,18 @@ impl CcBsSubentity {
             network_call.destination = 0;
         }
 
-        // Allocate one bearer for the local MS.
+        // EchoLink is always a simplex P2MP bridge, even when reached from an individual dial.
+        let is_echolink = network_entity == TetraEntity::Echolink;
         let circuit_calling = {
             let mut state = self.config.state_write();
             match self.circuits.allocate_circuit_with_allocator(
                 Direction::Both,
-                pdu.basic_service_information.communication_type,
-                pdu.simplex_duplex_selection,
+                if is_echolink {
+                    CommunicationType::P2Mp
+                } else {
+                    pdu.basic_service_information.communication_type
+                },
+                if is_echolink { false } else { pdu.simplex_duplex_selection },
                 &mut state.timeslot_alloc,
                 TimeslotOwner::Cmce,
             ) {
@@ -1118,14 +1155,14 @@ impl CcBsSubentity {
                 called_ts: ts,
                 calling_usage: usage,
                 called_usage: usage,
-                simplex_duplex: pdu.simplex_duplex_selection,
+                simplex_duplex: if is_echolink { false } else { pdu.simplex_duplex_selection },
                 priority: pdu.call_priority,
                 state: IndividualCallState::CallSetupPending,
                 formal_state: CcFormalState::Idle.after(CcFormalEvent::SetupRequest),
                 setup_timer_started: Some(self.dltime),
                 setup_timeout: Some(CallTimeoutSetupPhase::T60s),
                 active_timer_started: None,
-                call_timeout: Self::p2p_call_timeout(pdu.simplex_duplex_selection),
+                call_timeout: Self::p2p_call_timeout(if is_echolink { false } else { pdu.simplex_duplex_selection }),
                 called_over_brew: true,
                 calling_over_brew: false,
                 network_entity,
