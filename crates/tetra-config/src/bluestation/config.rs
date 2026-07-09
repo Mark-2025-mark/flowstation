@@ -3,8 +3,8 @@ use std::sync::{Arc, RwLock};
 use tetra_core::freqs::FreqInfo;
 
 use crate::bluestation::{
-    CfgAsterisk, CfgCellInfo, CfgControl, CfgDapnet, CfgEmergency, CfgGeoalarm, CfgHealth, CfgMeshcom, CfgNetInfo, CfgPhyIo, CfgRecovery,
-    CfgSecurity, CfgSnomNotify, CfgTpg2200Action, CfgWxService, PhyBackend, StackState,
+    CfgAsterisk, CfgCellInfo, CfgControl, CfgDapnet, CfgEcholink, CfgEmergency, CfgGeoalarm, CfgHealth, CfgMeshcom, CfgNetInfo, CfgPhyIo,
+    CfgRecovery, CfgSecurity, CfgSnomNotify, CfgTpg2200Action, CfgWxService, PhyBackend, StackState,
 };
 
 use super::sec_brew::CfgBrew;
@@ -75,11 +75,17 @@ pub struct StackConfig {
     /// Brew protocol (TetraPack/BrandMeister) configuration
     pub brew: Option<CfgBrew>,
 
+    /// Optional secondary Brew protocol bridge.
+    pub brew2: Option<CfgBrew>,
+
     /// Asterisk SIP/RTP bridge configuration.
     pub asterisk: CfgAsterisk,
 
     /// DAPNET inbound-message forwarding configuration.
     pub dapnet: CfgDapnet,
+
+    /// EchoLink directory and audio bridge configuration.
+    pub echolink: CfgEcholink,
 
     /// Geo-fence alarm configuration for TETRA/MeshCom positions.
     pub geoalarm: CfgGeoalarm,
@@ -310,6 +316,28 @@ impl StackConfig {
             return Err("recovery.issi_allowlist has more entries than recovery.max_cached_issis");
         }
 
+        if self.brew.is_some() && self.brew2.is_some() {
+            let brew = self.brew.as_ref().expect("checked");
+            let brew2 = self.brew2.as_ref().expect("checked");
+            if !brew.has_local_issi_allowlist() || !brew2.has_local_issi_allowlist() {
+                return Err("brew and brew2 require non-empty local_issi_allowlist when both are configured");
+            }
+
+            let Some(brew_allowlist) = brew.effective_local_issi_allowlist() else {
+                return Err("brew local_issi_allowlist is required when brew2 is configured");
+            };
+            let Some(brew2_allowlist) = brew2.effective_local_issi_allowlist() else {
+                return Err("brew2 local_issi_allowlist is required when brew is configured");
+            };
+            if brew_allowlist.is_empty() || brew2_allowlist.is_empty() {
+                return Err("brew and brew2 effective local_issi_allowlist must not be empty");
+            }
+            let brew_set: std::collections::HashSet<u32> = brew_allowlist.into_iter().collect();
+            if brew2_allowlist.into_iter().any(|issi| brew_set.contains(&issi)) {
+                return Err("brew and brew2 local_issi_allowlist must not overlap");
+            }
+        }
+
         Ok(())
     }
 }
@@ -431,7 +459,11 @@ impl SharedConfig {
                 telegram_allowed_rics: o.telegram_allowed_rics.clone(),
                 callout_source_issi: o.callout_source_issi,
                 callout_dest_issi: o.callout_dest_issi,
-                callout_incident_base: o.callout_incident_base.clamp(1, 256),
+                callout_tpg_ric: o.callout_tpg_ric,
+                callout_incident_base: o.callout_incident_base.min(255),
+                callout_priority: o.callout_priority.min(15),
+                callout_issi_priorities: o.callout_issi_priorities.clone(),
+                callout_tpg_ric_priorities: o.callout_tpg_ric_priorities.clone(),
                 callout_text_prefix: o.callout_text_prefix.clone(),
                 telegram_prefix: o.telegram_prefix.clone(),
                 rwth_core_enabled: o.rwth_core_enabled,
@@ -478,11 +510,52 @@ impl SharedConfig {
                 sds_dest_is_group: o.sds_dest_is_group,
                 tpg2200_source_issi: o.tpg2200_source_issi.max(1),
                 tpg2200_dest_issi: o.tpg2200_dest_issi,
-                tpg2200_incident_base: o.tpg2200_incident_base.clamp(1, 256),
+                tpg2200_ric: o.tpg2200_ric,
+                tpg2200_incident_base: o.tpg2200_incident_base.min(255),
+                tpg2200_priority: o.tpg2200_priority.min(15),
+                tpg2200_issi_priorities: o.tpg2200_issi_priorities.clone(),
+                tpg2200_ric_priorities: o.tpg2200_ric_priorities.clone(),
                 tpg2200_text_prefix: o.tpg2200_text_prefix.clone(),
                 tpg2200_max_text_chars: o.tpg2200_max_text_chars.clamp(8, 160),
                 sip_title_prefix: o.sip_title_prefix.clone(),
                 telegram_prefix: o.telegram_prefix.clone(),
+            }
+        } else {
+            base
+        }
+    }
+
+    /// Effective EchoLink settings: dashboard runtime override when present, otherwise TOML.
+    pub fn effective_echolink(&self) -> crate::bluestation::CfgEcholink {
+        let base = self.cfg.echolink.clone();
+        if let Some(o) = self.state_read().echolink_override.as_ref() {
+            crate::bluestation::CfgEcholink {
+                enabled: o.enabled,
+                callsign: o.callsign.clone(),
+                password: crate::bluestation::SecretField::from(o.password.clone()),
+                location: o.location.clone(),
+                status_text: o.status_text.clone(),
+                directory_servers: o.directory_servers.clone(),
+                directory_port: o.directory_port,
+                bind_addr: o.bind_addr.clone(),
+                audio_port: o.audio_port,
+                control_port: o.control_port,
+                inbound_enabled: o.inbound_enabled,
+                outbound_enabled: o.outbound_enabled,
+                outbound_prefix: o.outbound_prefix.clone(),
+                strip_outbound_prefix: o.strip_outbound_prefix,
+                service_numbers: o.service_numbers.clone(),
+                default_tetra_source_issi: o.default_tetra_source_issi,
+                default_tetra_dest_issi: o.default_tetra_dest_issi,
+                default_tetra_dest_is_group: o.default_tetra_dest_is_group,
+                routes: o.routes.clone(),
+                allowed_callsigns: o.allowed_callsigns.clone(),
+                allowed_node_ids: o.allowed_node_ids.clone(),
+                auto_connect: o.auto_connect.clone(),
+                reconnect_interval_secs: o.reconnect_interval_secs.max(1),
+                max_session_secs: o.max_session_secs.max(1),
+                telegram_session_alerts: o.telegram_session_alerts,
+                telegram_session_prefix: o.telegram_session_prefix.clone(),
             }
         } else {
             base

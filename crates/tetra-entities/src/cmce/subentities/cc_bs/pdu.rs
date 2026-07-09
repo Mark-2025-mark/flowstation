@@ -304,6 +304,16 @@ impl CcBsSubentity {
         self.group_listeners.get(&gssi).copied().unwrap_or(0) > 0
     }
 
+    pub(in crate::cmce::subentities::cc_bs) fn is_echolink_inbound_group_destination(&self, gssi: u32) -> bool {
+        let cfg = self.config.effective_echolink();
+        cfg.enabled && cfg.inbound_enabled && cfg.default_tetra_dest_is_group && cfg.default_tetra_dest_issi == gssi
+    }
+
+    pub(in crate::cmce::subentities::cc_bs) fn is_echolink_outbound_group_destination(&self, gssi: u32) -> bool {
+        let cfg = self.config.effective_echolink();
+        cfg.enabled && cfg.outbound_enabled && cfg.default_tetra_dest_is_group && cfg.default_tetra_dest_issi == gssi
+    }
+
     pub(super) fn inc_group_listener(&mut self, gssi: u32) {
         let entry = self.group_listeners.entry(gssi).or_insert(0);
         *entry += 1;
@@ -393,10 +403,8 @@ impl CcBsSubentity {
 
         for (call_id, origin) in to_drop {
             tracing::info!("CMCE: dropping call_id={} gssi={} (no listeners)", call_id, gssi);
-            if let CallOrigin::Network { brew_uuid } = origin {
-                if brew::is_brew_gssi_routable(&self.config, gssi) {
-                    self.notify_network_call_end(queue, brew_uuid);
-                };
+            if let CallOrigin::Network { network_entity, brew_uuid } = origin {
+                self.notify_network_call_end(queue, network_entity, brew_uuid);
             };
             self.release_group_call(queue, call_id, DisconnectCause::SwmiRequestedDisconnection);
         }
@@ -720,6 +728,46 @@ impl CcBsSubentity {
         cfg.route_outbound_raw(&raw)
     }
 
+    pub(super) fn echolink_route_target(&self, network_call: &NetworkCircuitCall) -> Option<String> {
+        let cfg = self.config.effective_echolink();
+        if !cfg.enabled || !cfg.outbound_enabled {
+            return None;
+        }
+
+        let raw = if !network_call.number.trim().is_empty() {
+            network_call.number.trim().to_string()
+        } else if network_call.destination != 0 {
+            network_call.destination.to_string()
+        } else {
+            return None;
+        };
+
+        let mut routed = raw.as_str();
+        let prefix_matched = !cfg.outbound_prefix.is_empty() && raw.starts_with(&cfg.outbound_prefix);
+        if prefix_matched && cfg.strip_outbound_prefix {
+            routed = &raw[cfg.outbound_prefix.len()..];
+        }
+
+        let routed = routed.trim();
+        if routed.is_empty() {
+            return None;
+        }
+        if let Some(target) = cfg.routes.get(routed) {
+            return Some(target.clone());
+        }
+        if cfg.service_numbers.iter().any(|number| number == routed) {
+            return if cfg.auto_connect.trim().is_empty() {
+                Some(routed.to_string())
+            } else {
+                Some(cfg.auto_connect.clone())
+            };
+        }
+        if cfg.service_numbers.is_empty() && prefix_matched {
+            return Some(routed.to_string());
+        }
+        None
+    }
+
     pub(super) fn signal_umac_circuit_open(
         queue: &mut MessageQueue,
         call: &CmceCircuit,
@@ -893,7 +941,14 @@ impl CcBsSubentity {
         if let Some(call) = self.active_calls.get(&call_id) {
             let ts = call.ts;
             let dest_ssi = call.dest_gssi;
-            let is_local = matches!(call.origin, CallOrigin::Local { .. });
+            let brew_notification = if matches!(&call.origin, CallOrigin::Local { .. }) {
+                BrewNotification::ForLocalSource {
+                    source_issi: call.source_issi,
+                    dest_gssi: dest_ssi,
+                }
+            } else {
+                BrewNotification::Never
+            };
 
             let carrier_num = call.carrier_num;
             if let Ok(circuit) = self.circuits.close_circuit_slot(Direction::Both, carrier_num, ts) {
@@ -901,16 +956,7 @@ impl CcBsSubentity {
             }
 
             // Ensure UMAC clears any hangtime override for this slot even if the circuit close is delayed.
-            self.notify_call_ended(
-                queue,
-                CallTimeslot { call_id, carrier_num, ts },
-                true,
-                if is_local {
-                    BrewNotification::IfGroupRoutable(dest_ssi)
-                } else {
-                    BrewNotification::Never
-                },
-            );
+            self.notify_call_ended(queue, CallTimeslot { call_id, carrier_num, ts }, true, brew_notification);
 
             self.release_timeslot_slot(CarrierSlot { carrier_num, ts });
         }

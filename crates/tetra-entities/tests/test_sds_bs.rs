@@ -23,7 +23,7 @@ use tetra_saps::sapmsg::{SapMsg, SapMsgInner};
 
 use tetra_entities::cmce::cmce_bs::CmceBs;
 use tetra_entities::net_control::{ControlCommand, make_control_link};
-use tetra_entities::tpg2200::build_tpg2200_callout_payload;
+use tetra_entities::tpg2200::{build_tpg2200_callout_payload, default_tpg2200_ric};
 use tetra_pdus::cmce::pdus::d_sds_data::DSdsData;
 
 use crate::common::ComponentTest;
@@ -139,7 +139,7 @@ fn test_raw_sds_type4_from_control_delivered_verbatim() {
     const DEST: u32 = 2628191;
     register_subscriber(&mut test, DEST);
 
-    let payload = build_tpg2200_callout_payload(1, "ALARM");
+    let payload = build_tpg2200_callout_payload(default_tpg2200_ric(), 0x11, 0x0F, "ALARM");
     assert_eq!(payload[0], 0xC3, "sanity: a TPG2200 Call-Out SDU starts with PID 0xC3");
 
     dispatcher.send(ControlCommand::SendRawSdsType4 {
@@ -154,7 +154,11 @@ fn test_raw_sds_type4_from_control_delivered_verbatim() {
     let msgs = test.dump_sinks();
 
     // The fix: the command is no longer dropped — exactly one D-SDS-DATA is delivered locally.
-    assert_eq!(count_d_sds_data(&msgs), 1, "raw Type-4 SDS must be delivered, not ignored (FH-BUG-052)");
+    assert_eq!(
+        count_d_sds_data(&msgs),
+        1,
+        "raw Type-4 SDS must be delivered, not ignored (FH-BUG-052)"
+    );
     assert_eq!(count_brew_sds(&msgs), 0, "a local dest must not be forwarded to Brew");
 
     // And the Type-4 SDU is delivered byte-for-byte, with NO SDS-TL wrap prepended.
@@ -198,6 +202,13 @@ fn test_sds_brew_forward() {
         feature_rssi_export: false,
         whitelisted_ssis: None,
         pbx_gateway_issis: None,
+        local_issi_allowlist: None,
+        local_issi_blocklist: Vec::new(),
+        subscriber_type_deregister: 0,
+        subscriber_type_register: 1,
+        subscriber_type_reregister: 2,
+        subscriber_type_affiliate: 8,
+        subscriber_type_deaffiliate: 9,
     });
     let mut test = ComponentTest::from_config(config, Some(dltime));
 
@@ -391,6 +402,13 @@ fn test_brew_inbound_allowed_bypasses_whitelist_but_honors_local_ranges() {
         feature_rssi_export: false,
         whitelisted_ssis: Some(vec![91]), // only GSSI 91 is whitelisted for OUTBOUND forwarding
         pbx_gateway_issis: None,
+        local_issi_allowlist: None,
+        local_issi_blocklist: Vec::new(),
+        subscriber_type_deregister: 0,
+        subscriber_type_register: 1,
+        subscriber_type_reregister: 2,
+        subscriber_type_affiliate: 8,
+        subscriber_type_deaffiliate: 9,
     });
     let test = ComponentTest::from_config(config, None);
 
@@ -496,6 +514,13 @@ fn test_u_status_brew_forward() {
         feature_rssi_export: false,
         whitelisted_ssis: None,
         pbx_gateway_issis: None,
+        local_issi_allowlist: None,
+        local_issi_blocklist: Vec::new(),
+        subscriber_type_deregister: 0,
+        subscriber_type_register: 1,
+        subscriber_type_reregister: 2,
+        subscriber_type_affiliate: 8,
+        subscriber_type_deaffiliate: 9,
     });
     let mut test = ComponentTest::from_config(config, Some(dltime));
 
@@ -1008,6 +1033,13 @@ fn brew_test_config() -> tetra_config::bluestation::StackConfig {
         feature_rssi_export: false,
         whitelisted_ssis: None,
         pbx_gateway_issis: None,
+        local_issi_allowlist: None,
+        local_issi_blocklist: Vec::new(),
+        subscriber_type_deregister: 0,
+        subscriber_type_register: 1,
+        subscriber_type_reregister: 2,
+        subscriber_type_affiliate: 8,
+        subscriber_type_deaffiliate: 9,
     });
     config
 }

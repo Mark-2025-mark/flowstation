@@ -29,4 +29,10 @@ pub enum TetraEntity {
 
     /// Asterisk SIP/RTP bridge
     Asterisk,
+
+    /// Secondary Brew protocol bridge.
+    Brew2,
+
+    /// EchoLink UDP/GSM bridge
+    Echolink,
 }

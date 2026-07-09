@@ -686,6 +686,45 @@ voice_service = true
 # Optional PBX gateway ISSIs that should always be considered Brew-routable
 # (useful for phone/PBX interconnect IDs that do not follow normal Tetrapack ISSI rules)
 # pbx_gateway_issis = [16777184, 16777186]
+#
+# OPTIONAL: local ISSI partition for multi-Brew setups.
+# With only one Brew server this can stay commented for legacy behaviour. If [brew2]
+# is configured too, both [brew] and [brew2] MUST set a non-empty local_issi_allowlist,
+# and the two lists must not overlap. This prevents the same radio from registering
+# or forwarding traffic through both Brew servers.
+# Include the source ISSI used by dashboard/integration SDS (normally 9999) on
+# exactly one server when those messages should leave through Brew.
+# local_issi_allowlist = [2632585, 2635411, 9999]
+# local_issi_blocklist = []
+#
+# Subscriber message type mapping. These TetraPack defaults can be overridden
+# independently for Brew servers that use another mapping.
+# subscriber_type_deregister = 0
+# subscriber_type_register = 1
+# subscriber_type_reregister = 2
+# subscriber_type_affiliate = 8
+# subscriber_type_deaffiliate = 9
+#
+# OPTIONAL: second Brew server. Same keys as [brew]. Use non-overlapping
+# local_issi_allowlist entries so every local ISSI belongs to exactly one server.
+# [brew2]
+# host = "second.brew.example"
+# port = 9000
+# tls = true
+# username = 123456701
+# password = "012345"
+# reconnect_delay_secs = 15
+# feature_sds_enabled = true
+# feature_rssi_export = false
+# whitelisted_ssis = [92]
+# pbx_gateway_issis = []
+# local_issi_allowlist = [2636000, 2636001]
+# local_issi_blocklist = []
+# subscriber_type_deregister = 0
+# subscriber_type_register = 1
+# subscriber_type_reregister = 2
+# subscriber_type_affiliate = 8
+# subscriber_type_deaffiliate = 9
 
 ###############################################################################
 
@@ -723,7 +762,11 @@ voice_service = true
 #
 # callout_source_issi = 9999
 # callout_dest_issi = 0
-# callout_incident_base = 2
+# callout_tpg_ric = 0x00090D10          # TPG2200 payload address
+# callout_id_base = 33                  # raw Call-Out ID byte 0..255
+# callout_priority = 15                 # raw priority/tone byte 0..15
+# callout_issi_priorities = {}          # optional: "TPG ISSI" = priority
+# callout_tpg_ric_priorities = {}       # optional: "0x00090D10" = priority
 # callout_text_prefix = "DAPNET"
 #
 # telegram_prefix = "DAPNET"
@@ -739,6 +782,52 @@ voice_service = true
 
 ###############################################################################
 
+# OPTIONAL: EchoLink directory and audio bridge
+#
+# Registers the station in the public EchoLink directory and bridges GSM-FR
+# audio to TETRA. Voice support requires a binary built with --features echolink
+# plus libgsm and the native tetra-codec library.
+#
+# Inbound EchoLink QSOs are simplex/P2MP group calls. Set default_tetra_dest_issi
+# to a GSSI and keep default_tetra_dest_is_group enabled. Outbound TETRA calls
+# can use either the prefix plus an EchoLink node ID or an explicit dial route.
+# Empty allowlists accept every remote station; otherwise callsign or node ID
+# must match. The normal network call lifecycle prevents media loops.
+#
+# [echolink]
+# enabled = false
+# callsign = "YOURCALL-L"
+# password = ""
+# location = "FlowStation"
+# status_text = "FlowStation EchoLink bridge"
+# directory_servers = ["servers.echolink.org", "backup.echolink.org"]
+# directory_port = 5200
+# bind_addr = "0.0.0.0"
+# audio_port = 5198
+# control_port = 5199
+#
+# inbound_enabled = true
+# outbound_enabled = true
+# outbound_prefix = "92"              # dial 92123456 to reach node 123456
+# strip_outbound_prefix = true
+# service_numbers = ["700"]
+# routes = { "700" = "ECHOTEST" }
+#
+# allowed_callsigns = []              # e.g. ["ECHOTEST", "DB0ABC-L"]
+# allowed_node_ids = []               # e.g. [9999, 123456]
+# auto_connect = ""
+# reconnect_interval_secs = 30
+# max_session_secs = 3600
+#
+# default_tetra_source_issi = 9999
+# default_tetra_dest_issi = 26225      # inbound destination GSSI
+# default_tetra_dest_is_group = true
+#
+# telegram_session_alerts = false
+# telegram_session_prefix = "EchoLink"
+
+###############################################################################
+
 # OPTIONAL: Snom/desk-phone ActionURL trigger for Motorola TPG2200 Call-Out
 #
 # Configure a Snom function key / ActionURL to call:
@@ -746,10 +835,14 @@ voice_service = true
 #
 # Optional text override:
 #   http://<flowstation>:<dashboard_port>/api/action/tpg2200?token=<token>&text=ALARM
+# Optional expert overrides:
+#   &incident=2&priority=12&tpg_ric=0x00090D10
+#   &id=33&priority=12&tpg_ric=0x00090D10
 #
 # Every accepted request sends a Type-4 SDS Call-Out to `dest_issi`.
 # The incident number starts at `incident_base` and increments in memory
-# on every trigger, wrapping after 256.
+# on every trigger, wrapping after 256. `id`/`callout_id`/`raw_id` overrides
+# the incident sequence with a direct selector byte from 0 through 255.
 #
 # This endpoint intentionally does not require the dashboard cookie session because phones cannot
 # reliably hold it. Keep `token` long/random and do not expose the dashboard port publicly.
@@ -759,7 +852,11 @@ voice_service = true
 # token = ""
 # source_issi = 9999
 # dest_issi = 0
+# tpg_ric = 0x00090D10
 # incident_base = 1
+# priority = 15
+# tpg_issi_priorities = {}              # optional: "TPG ISSI" = priority
+# tpg_ric_priorities = {}               # optional: "0x00090D10" = priority
 # default_text = "ALARM"
 # max_text_chars = 80
 
@@ -840,7 +937,11 @@ voice_service = true
 #
 # tpg2200_source_issi = 9999
 # tpg2200_dest_issi = 0                # TPG2200 ISSI
-# tpg2200_incident_base = 1            # cycles 1..=256
+# tpg2200_ric = 0x00090D10
+# tpg2200_callout_id_base = 33         # raw selector byte 0..255
+# tpg2200_priority = 15                # raw priority/tone byte 0..15
+# tpg2200_issi_priorities = {}         # optional: "TPG ISSI" = priority
+# tpg2200_ric_priorities = {}          # optional: "0x00090D10" = priority
 # tpg2200_text_prefix = "GeoAlarm"
 # tpg2200_max_text_chars = 80
 #

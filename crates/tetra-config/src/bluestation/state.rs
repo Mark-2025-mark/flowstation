@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use tetra_core::TimeslotAllocator;
+use tetra_core::tetra_entities::TetraEntity;
 
 /// A one-shot or repeating SDS broadcast message injected at runtime via the dashboard.
 ///
@@ -201,7 +202,11 @@ pub struct DapnetRuntimeOverride {
     pub telegram_allowed_rics: std::collections::BTreeSet<u32>,
     pub callout_source_issi: u32,
     pub callout_dest_issi: u32,
+    pub callout_tpg_ric: u32,
     pub callout_incident_base: u16,
+    pub callout_priority: u8,
+    pub callout_issi_priorities: std::collections::BTreeMap<u32, u8>,
+    pub callout_tpg_ric_priorities: std::collections::BTreeMap<u32, u8>,
     pub callout_text_prefix: String,
     pub telegram_prefix: String,
     pub rwth_core_enabled: bool,
@@ -212,6 +217,37 @@ pub struct DapnetRuntimeOverride {
     pub rwth_core_callsign: String,
     pub rwth_core_authkey: String,
     pub rwth_messages_limit: usize,
+}
+
+/// Runtime override for EchoLink settings edited from the dashboard.
+#[derive(Debug, Clone, Default)]
+pub struct EcholinkRuntimeOverride {
+    pub enabled: bool,
+    pub callsign: String,
+    pub password: String,
+    pub location: String,
+    pub status_text: String,
+    pub directory_servers: Vec<String>,
+    pub directory_port: u16,
+    pub bind_addr: String,
+    pub audio_port: u16,
+    pub control_port: u16,
+    pub inbound_enabled: bool,
+    pub outbound_enabled: bool,
+    pub outbound_prefix: String,
+    pub strip_outbound_prefix: bool,
+    pub service_numbers: Vec<String>,
+    pub default_tetra_source_issi: u32,
+    pub default_tetra_dest_issi: u32,
+    pub default_tetra_dest_is_group: bool,
+    pub routes: std::collections::BTreeMap<String, String>,
+    pub allowed_callsigns: Vec<String>,
+    pub allowed_node_ids: Vec<u32>,
+    pub auto_connect: String,
+    pub reconnect_interval_secs: u64,
+    pub max_session_secs: u64,
+    pub telegram_session_alerts: bool,
+    pub telegram_session_prefix: String,
 }
 
 /// Runtime override for GeoAlarm settings, edited from the dashboard.
@@ -241,7 +277,11 @@ pub struct GeoalarmRuntimeOverride {
     pub sds_dest_is_group: bool,
     pub tpg2200_source_issi: u32,
     pub tpg2200_dest_issi: u32,
+    pub tpg2200_ric: u32,
     pub tpg2200_incident_base: u16,
+    pub tpg2200_priority: u8,
+    pub tpg2200_issi_priorities: std::collections::BTreeMap<u32, u8>,
+    pub tpg2200_ric_priorities: std::collections::BTreeMap<u32, u8>,
     pub tpg2200_text_prefix: String,
     pub tpg2200_max_text_chars: usize,
     pub sip_title_prefix: String,
@@ -427,6 +467,50 @@ impl Default for GeoalarmRuntimeStatus {
 }
 
 #[derive(Debug, Clone)]
+pub struct EcholinkDirectoryStationStatus {
+    pub callsign: String,
+    pub id: u32,
+    pub ip: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct EcholinkRuntimeStatus {
+    pub configured: bool,
+    pub enabled: bool,
+    pub directory_status: String,
+    pub qso_status: String,
+    pub bind: String,
+    pub callsign: String,
+    pub connected_target: Option<String>,
+    pub routed_tetra_dest: Option<String>,
+    pub last_session_event: Option<String>,
+    pub last_rx: Option<String>,
+    pub last_tx: Option<String>,
+    pub last_error: Option<String>,
+    pub directory_stations: Vec<EcholinkDirectoryStationStatus>,
+}
+
+impl Default for EcholinkRuntimeStatus {
+    fn default() -> Self {
+        Self {
+            configured: false,
+            enabled: false,
+            directory_status: "disabled".to_string(),
+            qso_status: "idle".to_string(),
+            bind: String::new(),
+            callsign: String::new(),
+            connected_target: None,
+            routed_tetra_dest: None,
+            last_session_event: None,
+            last_rx: None,
+            last_tx: None,
+            last_error: None,
+            directory_stations: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct MeshcomNodeStatus {
     pub src: String,
     pub last_seen: String,
@@ -485,6 +569,8 @@ pub struct StackState {
     pub timeslot_alloc: TimeslotAllocator,
     /// Backhaul/network connection to SwMI (e.g., Brew/TetraPack). False -> fallback mode.
     pub network_connected: bool,
+    /// Per Brew entity connection state. `network_connected` is the aggregate over this map.
+    pub brew_entity_connected: HashMap<TetraEntity, bool>,
     /// Centralized subscriber registry for local-first routing decisions.
     pub subscribers: SubscriberRegistry,
     /// Queue of live SDS messages injected at runtime via the dashboard.
@@ -505,6 +591,8 @@ pub struct StackState {
     pub telegram_override: Option<TelegramRuntimeOverride>,
     /// Runtime override for DAPNET settings (dashboard editing). See DapnetRuntimeOverride.
     pub dapnet_override: Option<DapnetRuntimeOverride>,
+    /// Runtime override for EchoLink settings (dashboard editing). See EcholinkRuntimeOverride.
+    pub echolink_override: Option<EcholinkRuntimeOverride>,
     /// Runtime override for GeoAlarm settings (dashboard editing). See GeoalarmRuntimeOverride.
     pub geoalarm_override: Option<GeoalarmRuntimeOverride>,
     /// Runtime override for MeshCom settings (dashboard editing). See MeshcomRuntimeOverride.
@@ -517,6 +605,8 @@ pub struct StackState {
     pub asterisk_status: AsteriskRuntimeStatus,
     /// Runtime DAPNET receiver/forwarding status for `/api/dapnet` and the Health tab.
     pub dapnet_status: DapnetRuntimeStatus,
+    /// Runtime EchoLink bridge status for `/api/echolink` and the Health tab.
+    pub echolink_status: EcholinkRuntimeStatus,
     /// Runtime GeoAlarm status for `/api/geoalarm`.
     pub geoalarm_status: GeoalarmRuntimeStatus,
     /// Runtime MeshCom UDP bridge status for `/api/meshcom` and the Health tab.
@@ -630,6 +720,7 @@ impl Default for StackState {
         Self {
             timeslot_alloc: TimeslotAllocator::default(),
             network_connected: false,
+            brew_entity_connected: HashMap::new(),
             subscribers: SubscriberRegistry::new(),
             live_sds_queue: VecDeque::new(),
             next_live_sds_id: 1,
@@ -637,12 +728,14 @@ impl Default for StackState {
             wx_override: None,
             telegram_override: None,
             dapnet_override: None,
+            echolink_override: None,
             geoalarm_override: None,
             meshcom_override: None,
             snom_notify_override: None,
             tpg2200_action_next_incident: None,
             asterisk_status: AsteriskRuntimeStatus::default(),
             dapnet_status: DapnetRuntimeStatus::default(),
+            echolink_status: EcholinkRuntimeStatus::default(),
             geoalarm_status: GeoalarmRuntimeStatus::default(),
             meshcom_status: MeshcomRuntimeStatus::default(),
             active_call_ts: std::collections::HashMap::new(),

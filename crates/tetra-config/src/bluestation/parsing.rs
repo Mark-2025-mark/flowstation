@@ -14,6 +14,7 @@ use super::sec_asterisk::{CfgAsteriskDto, apply_asterisk_patch};
 use super::sec_brew::{CfgBrewDto, apply_brew_patch};
 use super::sec_dapnet::{CfgDapnetDto, apply_dapnet_patch};
 use super::sec_dashboard::{CfgDashboardDto, apply_dashboard_patch};
+use super::sec_echolink::{CfgEcholinkDto, apply_echolink_patch};
 use super::sec_emergency::{CfgEmergencyDto, apply_emergency_patch};
 use super::sec_geoalarm::{CfgGeoalarmDto, apply_geoalarm_patch};
 use super::sec_health::{CfgHealthDto, apply_health_patch};
@@ -122,6 +123,11 @@ pub fn from_toml_str(toml_str: &str) -> Result<StackConfig, Box<dyn std::error::
     {
         return Err(format!("Unrecognized fields in brew config: {:?}", sorted_keys(&brew.extra)).into());
     }
+    if let Some(ref brew2) = root.brew2
+        && !brew2.extra.is_empty()
+    {
+        return Err(format!("Unrecognized fields in brew2 config: {:?}", sorted_keys(&brew2.extra)).into());
+    }
 
     // Optional asterisk section
     if let Some(ref asterisk) = root.asterisk
@@ -137,13 +143,19 @@ pub fn from_toml_str(toml_str: &str) -> Result<StackConfig, Box<dyn std::error::
         return Err(format!("Unrecognized fields in dapnet config: {:?}", sorted_keys(&dapnet.extra)).into());
     }
 
+    // Optional echolink section
+    if let Some(ref echolink) = root.echolink
+        && !echolink.extra.is_empty()
+    {
+        return Err(format!("Unrecognized fields in echolink config: {:?}", sorted_keys(&echolink.extra)).into());
+    }
+
     // Optional geoalarm section
     if let Some(ref geoalarm) = root.geoalarm
         && !geoalarm.extra.is_empty()
     {
         return Err(format!("Unrecognized fields in geoalarm config: {:?}", sorted_keys(&geoalarm.extra)).into());
     }
-
     // Optional meshcom section
     if let Some(ref meshcom) = root.meshcom
         && !meshcom.extra.is_empty()
@@ -237,8 +249,10 @@ pub fn from_toml_str(toml_str: &str) -> Result<StackConfig, Box<dyn std::error::
         net: net_dto_to_cfg(root.net_info),
         cell: cell_cfg,
         brew: None,
+        brew2: None,
         asterisk: apply_asterisk_patch(root.asterisk.unwrap_or_default())?,
         dapnet: apply_dapnet_patch(root.dapnet.unwrap_or_default())?,
+        echolink: apply_echolink_patch(root.echolink.unwrap_or_default())?,
         geoalarm: apply_geoalarm_patch(root.geoalarm.unwrap_or_default())?,
         meshcom: apply_meshcom_patch(root.meshcom.unwrap_or_default())?,
         tpg2200_action: apply_tpg2200_action_patch(root.tpg2200_action.unwrap_or_default())?,
@@ -256,6 +270,9 @@ pub fn from_toml_str(toml_str: &str) -> Result<StackConfig, Box<dyn std::error::
 
     if let Some(brew) = root.brew {
         cfg.brew = Some(apply_brew_patch(brew));
+    }
+    if let Some(brew2) = root.brew2 {
+        cfg.brew2 = Some(apply_brew_patch(brew2));
     }
 
     if let Some(dashboard) = root.dashboard {
@@ -314,8 +331,10 @@ struct TomlConfigRoot {
     cell_info: CellInfoDto,
 
     brew: Option<CfgBrewDto>,
+    brew2: Option<CfgBrewDto>,
     asterisk: Option<CfgAsteriskDto>,
     dapnet: Option<CfgDapnetDto>,
+    echolink: Option<CfgEcholinkDto>,
     geoalarm: Option<CfgGeoalarmDto>,
     meshcom: Option<CfgMeshcomDto>,
     tpg2200_action: Option<CfgTpg2200ActionDto>,
@@ -467,7 +486,11 @@ callout_allowed_rics = ["0004520"]
 telegram_allowed_rics = ["0000200", "0x1C40"]
 callout_source_issi = 9999
 callout_dest_issi = 1234567
-callout_incident_base = 2
+callout_tpg_ric = 0x00090D10
+callout_id_base = 33
+callout_priority = 12
+callout_issi_priorities = { "1234567" = 14 }
+callout_tpg_ric_priorities = { "0x00090D10" = 13 }
 callout_text_prefix = "DAPNET"
 telegram_prefix = "DAPNET"
 rwth_core_enabled = true
@@ -508,7 +531,11 @@ enabled = true
 token = "example-token"
 source_issi = 9999
 dest_issi = 1234567
+tpg_ric = 0x00090D10
 incident_base = 1
+priority = 15
+tpg_issi_priorities = { "1234567" = 14 }
+tpg_ric_priorities = { "0x00090D10" = 13 }
 default_text = "ALARM"
 max_text_chars = 80
 
@@ -557,6 +584,9 @@ sds_queue_critical = 128
         assert!(cfg.recovery.enabled);
         assert!(cfg.tpg2200_action.enabled);
         assert_eq!(cfg.tpg2200_action.dest_issi, 1234567);
+        assert_eq!(cfg.tpg2200_action.tpg_ric, 0x0009_0D10);
+        assert_eq!(cfg.tpg2200_action.tpg_issi_priorities.get(&1234567), Some(&14));
+        assert_eq!(cfg.tpg2200_action.tpg_ric_priorities.get(&0x0009_0D10), Some(&13));
         assert!(cfg.snom_notify.enabled);
         assert_eq!(cfg.snom_notify.endpoints, vec!["385"]);
         assert!(cfg.snom_notify.notify_sds);
@@ -571,7 +601,10 @@ sds_queue_critical = 128
         assert_eq!(cfg.asterisk.service_numbers, vec!["600".to_string(), "601".to_string()]);
         assert!(cfg.dapnet.enabled);
         assert!(cfg.dapnet.rwth_core_enabled);
-        assert_eq!(cfg.dapnet.callout_incident_base, 2);
+        assert_eq!(cfg.dapnet.callout_incident_base, 33);
+        assert_eq!(cfg.dapnet.callout_priority, 12);
+        assert_eq!(cfg.dapnet.callout_issi_priorities.get(&1234567), Some(&14));
+        assert_eq!(cfg.dapnet.callout_tpg_ric_priorities.get(&0x0009_0D10), Some(&13));
         assert_eq!(cfg.dapnet.ric_issi_routes.get(&632585), Some(&2632585));
         assert_eq!(cfg.dapnet.ric_issi_routes.get(&632586), Some(&2632586));
         assert_eq!(cfg.dapnet.ric_gssi_routes.get(&4520), Some(&80));
@@ -786,5 +819,91 @@ pbx_gateway_issi = [16777184, 16777186]
         let cfg = from_toml_str(&toml).expect("brew config with pbx_gateway_issi alias must parse");
         let brew = cfg.brew.expect("brew config should be present");
         assert_eq!(brew.pbx_gateway_issis, Some(vec![16_777_184, 16_777_186]));
+    }
+
+    fn dual_brew_toml(brew_lists: &str, brew2_lists: &str) -> String {
+        minimal_toml("")
+            + &format!(
+                r#"
+[brew]
+host = "brew-one.invalid"
+tls = false
+username = 123456700
+password = "one"
+{}
+
+[brew2]
+host = "brew-two.invalid"
+tls = false
+username = 123456701
+password = "two"
+{}
+"#,
+                brew_lists, brew2_lists
+            )
+    }
+
+    #[test]
+    fn dual_brew_requires_nonempty_disjoint_local_allowlists() {
+        let missing = from_toml_str(&dual_brew_toml("", "")).expect("dual Brew config parses");
+        assert_eq!(
+            missing.validate(),
+            Err("brew and brew2 require non-empty local_issi_allowlist when both are configured")
+        );
+
+        let overlapping = from_toml_str(&dual_brew_toml(
+            "local_issi_allowlist = [2632585, 2635411]",
+            "local_issi_allowlist = [2635411, 2636000]",
+        ))
+        .expect("dual Brew config parses");
+        assert_eq!(overlapping.validate(), Err("brew and brew2 local_issi_allowlist must not overlap"));
+
+        let valid = from_toml_str(&dual_brew_toml(
+            "local_issi_allowlist = [2632585]",
+            "local_issi_allowlist = [2636000]",
+        ))
+        .expect("dual Brew config parses");
+        assert!(valid.validate().is_ok());
+    }
+
+    #[test]
+    fn dual_brew_blocklist_wins_and_must_leave_each_server_an_issi() {
+        let blocked = from_toml_str(&dual_brew_toml(
+            "local_issi_allowlist = [2632585]\nlocal_issi_blocklist = [2632585]",
+            "local_issi_allowlist = [2636000]",
+        ))
+        .expect("dual Brew config parses");
+        assert_eq!(
+            blocked.validate(),
+            Err("brew and brew2 effective local_issi_allowlist must not be empty")
+        );
+
+        let valid = from_toml_str(&dual_brew_toml(
+            "local_issi_allowlist = [2632585, 2635411]\nlocal_issi_blocklist = [2635411]",
+            "local_issi_allowlist = [2636000]",
+        ))
+        .expect("dual Brew config parses");
+        let brew = valid.brew.as_ref().expect("brew config");
+        assert!(brew.local_issi_allowed(2632585));
+        assert!(!brew.local_issi_allowed(2635411));
+        assert!(valid.validate().is_ok());
+    }
+
+    #[test]
+    fn brew_list_aliases_and_subscriber_types_parse_per_server() {
+        let cfg = from_toml_str(&dual_brew_toml(
+            "local_issi_whitelist = [2632585]\nsubscriber_type_affiliate = 18",
+            "local_issi_allowlist = [2636000]\nissi_blacklist = [2636001]\nsubscriber_type_register = 11",
+        ))
+        .expect("dual Brew aliases parse");
+
+        let brew = cfg.brew.as_ref().expect("brew config");
+        let brew2 = cfg.brew2.as_ref().expect("brew2 config");
+        assert_eq!(brew.local_issi_allowlist, Some(vec![2_632_585]));
+        assert_eq!(brew.subscriber_type_affiliate, 18);
+        assert_eq!(brew2.local_issi_blocklist, vec![2_636_001]);
+        assert_eq!(brew2.subscriber_type_register, 11);
+        assert_eq!(brew2.subscriber_type_deregister, 0);
+        assert!(cfg.validate().is_ok());
     }
 }

@@ -224,6 +224,17 @@ cargo build --release
 ./target/release/bluestation-bs config.toml
 ```
 
+For voice bridges, install the native codec dependencies first and select the
+required feature:
+
+```bash
+# EchoLink voice
+cargo build --release --features echolink
+
+# Asterisk and EchoLink voice together
+cargo build --release --features asterisk,echolink
+```
+
 ### As a systemd service
 
 ```bash
@@ -289,11 +300,63 @@ username = 123456700
 password = "your_password"
 ```
 
+Optional second Brew backhaul:
+
+```toml
+[brew]
+host = "core-a.example"
+username = 123456700
+password = "..."
+local_issi_allowlist = [2632585]
+local_issi_blocklist = []
+
+[brew2]
+host = "core-b.example"
+username = 123456701
+password = "..."
+local_issi_allowlist = [2635411]
+local_issi_blocklist = []
+```
+
+When both `[brew]` and `[brew2]` are configured, each section must define a
+non-empty `local_issi_allowlist`, and the lists must not overlap. Registrations,
+SDS, voice forwarding, RSSI export, and group-call lifecycle events are routed to
+exactly one Brew server by the local source ISSI, preventing loops or A↔B
+forwarding between Brew backhauls. `local_issi_blocklist` is applied after the
+allowlist and can be used to exclude a terminal from one Brew server without
+changing larger allowlist ranges/lists.
+
+`local_issi_whitelist` / `issi_whitelist` and
+`local_issi_blacklist` / `issi_blacklist` remain accepted aliases. The explicit
+`allowlist` and `blocklist` names above are preferred.
+
+Different Brew implementations may use different subscriber message type
+numbers. Defaults are compatible with TetraPack (`0/1/2/8/9`); override them per
+server only when its documentation requires it:
+
+```toml
+subscriber_type_deregister = 0
+subscriber_type_register = 1
+subscriber_type_reregister = 2
+subscriber_type_affiliate = 8
+subscriber_type_deaffiliate = 9
+```
+
+Loop protection also rejects Brew-originated subscriber state for
+`cell_info.local_ssi_ranges` and for every ISSI assigned to either local Brew
+allowlist. A local terminal is therefore never mirrored back from Brew into
+CMCE as an external listener.
+
+In a dual-Brew setup, assign the configured source ISSI for dashboard and
+integration-generated SDS (normally `9999`) to exactly one server's
+`local_issi_allowlist`. This selects which backhaul carries those messages; it
+does not expose Brew-originated state for that reserved local ISSI.
+
 ### Asterisk SIP/RTP bridge
 
 FlowStation can register as a PJSIP endpoint and bridge calls between TETRA
 terminals and Asterisk phones. Brew remains available in parallel; only configured
-service numbers are routed to Asterisk.
+service numbers are routed to Asterisk, unless a wildcard is configured.
 
 ```toml
 [asterisk]
@@ -360,6 +423,12 @@ qualify_frequency=30
 
 `service_numbers` is deliberately an allowlist. If a TETRA user dials `91385`,
 FlowStation strips `91`, checks that `385` is listed, then calls SIP user `385`.
+To route every `91...` dial to Asterisk, set `service_numbers = ["*"]`.
+Alternatively, `outbound_prefix = "91*"` makes the prefix itself a wildcard. More
+specific prefix wildcards are also allowed inside `service_numbers`, for example
+`["38*"]` routes `9138...` to Asterisk after stripping `91`. Exact entries still
+work as before, so `service_numbers = ["385"]` permits `91385` and direct `385`,
+but not `91600`.
 
 ### Telegram alerts
 
@@ -415,7 +484,11 @@ telegram_allowed_rics = []
 
 callout_source_issi = 9999
 callout_dest_issi = 0
-callout_incident_base = 2
+callout_tpg_ric = 0x00090D10
+callout_id_base = 33
+callout_priority = 15
+callout_issi_priorities = {}
+callout_tpg_ric_priorities = {}
 callout_text_prefix = "DAPNET"
 
 telegram_prefix = "DAPNET"
@@ -430,13 +503,19 @@ rwth_core_authkey = "your-rwth-core-authkey"
 rwth_messages_limit = 100
 ```
 
+For DAPNET and GeoAlarm, `callout_id_base` is the raw selector byte and cycles
+through `0..255`. Legacy `callout_incident_base` and
+`tpg2200_incident_base` keys remain accepted and are converted to the selector
+sequence. Per-target priority uses ISSI first, then TPG RIC, then the default.
+
 Keep `password` and `rwth_core_authkey` private and out of commits.
 
 ### Motorola TPG2200 ActionURL trigger
 
 FlowStation can expose a token-protected HTTP endpoint so a Snom function key
-can trigger a Motorola TPG2200 Call-Out. Every accepted request increments the
-incident number in memory and wraps after 256.
+can trigger a Motorola TPG2200 Call-Out. Without URL parameters it advances the
+incident sequence: incident `1` sends selector `0x11`, incident `2` sends
+`0x21`, incident `3` sends `0x31`, and so on.
 
 ```toml
 [tpg2200_action]
@@ -444,7 +523,11 @@ enabled = true
 token = "long-random-token"
 source_issi = 9999
 dest_issi = 2632585
+tpg_ric = 0x00090D10
 incident_base = 1
+priority = 15
+tpg_issi_priorities = { "2632585" = 15 }
+tpg_ric_priorities = { "0x00090D10" = 15 }
 default_text = "ALARM"
 max_text_chars = 80
 ```
@@ -454,7 +537,13 @@ Snom ActionURL examples:
 ```text
 http://<flowstation>:8080/api/action/tpg2200?token=<token>
 http://<flowstation>:8080/api/action/tpg2200?token=<token>&text=ALARM
+http://<flowstation>:8080/api/action/tpg2200?token=<token>&incident=2&priority=12&tpg_ric=0x00090D10
+http://<flowstation>:8080/api/action/tpg2200?token=<token>&id=33&priority=12&tpg_ric=0x00090D10
 ```
+
+`incident` follows the incident sequence. `id`, `callout_id`, or `raw_id`
+selects the raw ID byte directly. Priority overrides are resolved by destination
+ISSI first, then by TPG RIC, and finally by the global `priority`.
 
 ### Snom XML display notifications
 
@@ -492,7 +581,8 @@ sure AMI is enabled and `res_pjsip_notify.so` loads.
 
 EchoLink uses the public directory servers for login/status and UDP 5198/5199
 for QSO audio/control. GSM-FR audio requires `libgsm1-dev` at build time and the
-TETRA ACELP codec for TETRA audio conversion.
+TETRA ACELP codec for TETRA audio conversion. Build the station with
+`cargo build --release --features echolink`.
 
 ```toml
 [echolink]
@@ -518,14 +608,19 @@ allowed_node_ids = []
 auto_connect = ""
 reconnect_interval_secs = 30
 max_session_secs = 3600
+telegram_session_alerts = false
+telegram_session_prefix = "EchoLink"
 
 default_tetra_source_issi = 9999
-default_tetra_dest_issi = 2632585
-default_tetra_dest_is_group = false
+default_tetra_dest_issi = 26225
+default_tetra_dest_is_group = true
 ```
 
 The EchoLink dashboard page shows directory status, station count, QSO status,
-current route, last TX/error, and the downloaded directory list.
+current route, last TX/error, and the downloaded directory list. Empty remote
+allowlists accept all stations; when either list is populated, the remote
+callsign or node ID must match. Incoming audio is routed as a simplex/P2MP group
+call and uses the normal call ownership and teardown path for loop protection.
 
 ### MeshCom external UDP bridge
 
@@ -658,20 +753,21 @@ The dashboard shows a persistent red warning banner with the parse error so you 
 FlowStation can bridge TETRA to external paging and telephony networks and push
 alerts out to desk phones, dashboards, and Telegram. DAPNET, Snom display
 notifications, GeoAlarm, and the TPG2200 trigger are all part of the **default
-build** — just fill in their config sections. Asterisk SIP/RTP telephony is
-**feature-gated** (see below).
+build** — just fill in their config sections. Asterisk SIP/RTP and EchoLink
+voice are **feature-gated** (see below).
 
-> **Asterisk is not in the default build.** To use the SIP/RTP bridge the device
-> binary must be built with `cargo build --release --features asterisk`, and the
+> **Voice bridges are not in the default build.** Build Asterisk SIP/RTP with
+> `--features asterisk`, EchoLink audio with `--features echolink`, or both with
+> `--features asterisk,echolink`. The
 > native [`tetra-codec`](https://github.com/outerplane/tetra-codec) (outerplane)
 > ACELP library must be installed so FlowStation can convert between TETRA ACELP
-> and PCM audio. The default `cargo build --release` does **not** include Asterisk;
-> DAPNET, Snom notify, GeoAlarm, the TPG2200 trigger, and the dashboard all work
-> without it.
+> and PCM audio; EchoLink additionally needs `libgsm1-dev`. The default build
+> keeps EchoLink config, directory status, and dashboard support available but
+> does not compile QSO control or native voice transcoding.
 
-### TETRA ACELP codec (Asterisk only)
+### TETRA ACELP codec (voice bridges)
 
-The Asterisk audio bridge needs a TETRA ACELP codec implementation. One tested
+The Asterisk and EchoLink audio bridges need a TETRA ACELP codec implementation. One tested
 implementation is `outerplane/tetra-codec`:
 
 ```bash
@@ -943,7 +1039,11 @@ telegram_allowed_rics = []
 
 callout_source_issi = 9999
 callout_dest_issi = 0
-callout_incident_base = 2
+callout_tpg_ric = 0x00090D10
+callout_id_base = 33
+callout_priority = 15
+callout_issi_priorities = {}
+callout_tpg_ric_priorities = {}
 callout_text_prefix = "DAPNET"
 
 telegram_prefix = "DAPNET"
@@ -958,13 +1058,19 @@ rwth_core_authkey = "your-rwth-core-authkey"
 rwth_messages_limit = 100
 ```
 
+For DAPNET and GeoAlarm, `callout_id_base` is the raw selector byte and cycles
+through `0..255`. Legacy `callout_incident_base` and
+`tpg2200_incident_base` keys remain accepted and are converted to the selector
+sequence. Per-target priority uses ISSI first, then TPG RIC, then the default.
+
 Keep `password` and `rwth_core_authkey` private and out of commits.
 
 ### Motorola TPG2200 ActionURL trigger
 
 FlowStation can expose a token-protected HTTP endpoint so a Snom function key
-can trigger a Motorola TPG2200 Call-Out. Every accepted request increments the
-incident number in memory and wraps after 256.
+can trigger a Motorola TPG2200 Call-Out. Without URL parameters it advances the
+incident sequence: incident `1` sends selector `0x11`, incident `2` sends
+`0x21`, incident `3` sends `0x31`, and so on.
 
 ```toml
 [tpg2200_action]
@@ -972,7 +1078,11 @@ enabled = true
 token = "long-random-token"
 source_issi = 9999
 dest_issi = 2632585
+tpg_ric = 0x00090D10
 incident_base = 1
+priority = 15
+tpg_issi_priorities = { "2632585" = 15 }
+tpg_ric_priorities = { "0x00090D10" = 15 }
 default_text = "ALARM"
 max_text_chars = 80
 ```
@@ -982,7 +1092,13 @@ Snom ActionURL examples:
 ```text
 http://<flowstation>:8080/api/action/tpg2200?token=<token>
 http://<flowstation>:8080/api/action/tpg2200?token=<token>&text=ALARM
+http://<flowstation>:8080/api/action/tpg2200?token=<token>&incident=2&priority=12&tpg_ric=0x00090D10
+http://<flowstation>:8080/api/action/tpg2200?token=<token>&id=33&priority=12&tpg_ric=0x00090D10
 ```
+
+`incident` follows the incident sequence. `id`, `callout_id`, or `raw_id`
+selects the raw ID byte directly. Priority overrides are resolved by destination
+ISSI first, then by TPG RIC, and finally by the global `priority`.
 
 ### Snom XML display notifications
 
@@ -1051,7 +1167,11 @@ sds_dest_is_group = false
 
 tpg2200_source_issi = 9999
 tpg2200_dest_issi = 0
-tpg2200_incident_base = 1
+tpg2200_ric = 0x00090D10
+tpg2200_callout_id_base = 33
+tpg2200_priority = 15
+tpg2200_issi_priorities = {}
+tpg2200_ric_priorities = {}
 tpg2200_text_prefix = "GeoAlarm"
 tpg2200_max_text_chars = 80
 
