@@ -4717,6 +4717,15 @@ fn serve_asterisk_status(stream: TcpStream, shared_config: &Option<tetra_config:
                     "register": c.asterisk.register,
                     "sip_listen": format!("{}:{}", c.asterisk.bind_addr, c.asterisk.bind_port),
                     "remote": format!("{}:{}", c.asterisk.remote_host, c.asterisk.remote_port),
+                    "outbound_proxy": if c.asterisk.outbound_proxy_host.trim().is_empty() {
+                        serde_json::Value::Null
+                    } else {
+                        serde_json::json!(format!(
+                            "{}:{}",
+                            c.asterisk.outbound_proxy_host, c.asterisk.outbound_proxy_port
+                        ))
+                    },
+                    "from_domain": c.asterisk.from_domain.clone(),
                     "rtp_port_range": format!("{}-{}", c.asterisk.rtp_port_min, c.asterisk.rtp_port_max),
                     "codec": c.asterisk.codec.clone(),
                     "outbound_prefix": c.asterisk.outbound_prefix.clone(),
@@ -4732,6 +4741,11 @@ fn serve_asterisk_status(stream: TcpStream, shared_config: &Option<tetra_config:
                     "register_status": runtime.register_status,
                     "sip_listen": runtime.sip_listen,
                     "remote": runtime.remote,
+                    "outbound_proxy": if runtime.outbound_proxy.is_empty() {
+                        serde_json::Value::Null
+                    } else {
+                        serde_json::json!(runtime.outbound_proxy)
+                    },
                     "rtp_port_range": runtime.rtp_port_range,
                     "codec": runtime.codec,
                     "active_dialogs": runtime.active_dialogs,

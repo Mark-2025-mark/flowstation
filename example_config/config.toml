@@ -814,14 +814,25 @@ voice_service = true
 
 ###############################################################################
 
-# OPTIONAL: Asterisk SIP/RTP bridge — parallel to Brew, not a replacement.
-# Only destinations listed in service_numbers are routed to Asterisk; everything else
-# stays on the normal local/Brew path.
+# OPTIONAL: SIP client / PBX bridge — connects FlowStation to any SIP registrar
+# (Asterisk, FreeSWITCH, 3CX, etc.) like a Zoiper softphone extension.
+# Runs in parallel with Brew; only destinations listed in service_numbers are routed
+# to the PBX; everything else stays on the normal local/Brew path.
 #
 # Example: a TETRA dial string 91600 with outbound_prefix="91" and strip=true becomes
 # SIP user 600, but only because "600" is listed below.
 #
-# NOTE: Asterisk support is FEATURE-GATED on FlowStation. The default build does NOT
+# Zoiper-style account mapping:
+#   local_user     = extension / username
+#   auth_user      = auth username (often same as local_user)
+#   password       = SIP password
+#   from_domain    = SIP domain / realm shown in URIs
+#   remote_host    = SIP server address (IP or hostname)
+#   remote_port    = SIP server port (usually 5060)
+#   outbound_proxy_host/port = optional outbound proxy (leave host empty for direct)
+#   contact_host   = public IP/hostname the PBX uses to reach this Pi (NAT)
+#
+# NOTE: SIP voice bridge is FEATURE-GATED on FlowStation. The default build does NOT
 # include it. To use this section the device binary must be built with
 #   cargo build --release --features asterisk
 # and requires the native tetra-codec (outerplane) ACELP library installed. The
@@ -839,11 +850,13 @@ voice_service = true
 # rtp_port_max = 30100
 # bind_addr = "0.0.0.0"
 # bind_port = 5062
-# remote_host = "127.0.0.1"
+# remote_host = "pbx.example.com"
 # remote_port = 5060
-# contact_host = "127.0.0.1"
-# from_domain = "127.0.0.1"
-# local_user = "flowstation"
-# auth_user = "flowstation"
+# outbound_proxy_host = ""
+# outbound_proxy_port = 5060
+# contact_host = "192.168.1.50"
+# from_domain = "pbx.example.com"
+# local_user = "1001"
+# auth_user = "1001"
 # password = ""
-# realm = "asterisk"
+# realm = "pbx.example.com"

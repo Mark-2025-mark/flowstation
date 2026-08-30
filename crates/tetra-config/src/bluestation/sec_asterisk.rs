@@ -5,7 +5,7 @@ use toml::Value;
 
 use crate::bluestation::SecretField;
 
-/// Asterisk SIP/RTP bridge configuration.
+/// SIP client / PBX bridge configuration (Asterisk, FreeSWITCH, or any SIP registrar).
 #[derive(Debug, Clone)]
 pub struct CfgAsterisk {
     pub enabled: bool,
@@ -21,6 +21,10 @@ pub struct CfgAsterisk {
     pub bind_port: u16,
     pub remote_host: String,
     pub remote_port: u16,
+    /// Optional outbound SIP proxy (Zoiper-style). When set, all outbound SIP is sent here
+    /// instead of directly to `remote_host`. Leave empty to connect straight to the PBX.
+    pub outbound_proxy_host: String,
+    pub outbound_proxy_port: u16,
     pub contact_host: String,
     pub from_domain: String,
     pub local_user: String,
@@ -76,6 +80,10 @@ pub struct CfgAsteriskDto {
     pub remote_host: String,
     #[serde(default = "default_remote_port")]
     pub remote_port: u16,
+    #[serde(default)]
+    pub outbound_proxy_host: String,
+    #[serde(default = "default_outbound_proxy_port")]
+    pub outbound_proxy_port: u16,
     #[serde(default = "default_contact_host")]
     pub contact_host: String,
     #[serde(default = "default_from_domain")]
@@ -121,6 +129,8 @@ impl Default for CfgAsteriskDto {
             bind_port: default_bind_port(),
             remote_host: default_remote_host(),
             remote_port: default_remote_port(),
+            outbound_proxy_host: String::new(),
+            outbound_proxy_port: default_outbound_proxy_port(),
             contact_host: default_contact_host(),
             from_domain: default_from_domain(),
             local_user: default_local_user(),
@@ -183,6 +193,10 @@ fn default_remote_port() -> u16 {
     5060
 }
 
+fn default_outbound_proxy_port() -> u16 {
+    5060
+}
+
 fn default_contact_host() -> String {
     "127.0.0.1".to_string()
 }
@@ -231,6 +245,9 @@ pub fn apply_asterisk_patch(src: CfgAsteriskDto) -> Result<CfgAsterisk, String> 
         }
         if src.remote_port == 0 {
             return Err("asterisk: remote_port cannot be 0".to_string());
+        }
+        if !src.outbound_proxy_host.trim().is_empty() && src.outbound_proxy_port == 0 {
+            return Err("asterisk: outbound_proxy_port cannot be 0 when outbound_proxy_host is set".to_string());
         }
         if src.rtp_port_min == 0 || src.rtp_port_max == 0 || src.rtp_port_min > src.rtp_port_max {
             return Err("asterisk: rtp_port_min/rtp_port_max must define a valid non-zero range".to_string());
@@ -291,6 +308,8 @@ pub fn apply_asterisk_patch(src: CfgAsteriskDto) -> Result<CfgAsterisk, String> 
         bind_port: src.bind_port,
         remote_host: src.remote_host,
         remote_port: src.remote_port,
+        outbound_proxy_host: src.outbound_proxy_host.trim().to_string(),
+        outbound_proxy_port: src.outbound_proxy_port,
         contact_host: src.contact_host,
         from_domain: src.from_domain,
         local_user: src.local_user,

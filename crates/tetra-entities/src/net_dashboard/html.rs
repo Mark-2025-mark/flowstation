@@ -2289,7 +2289,7 @@ tbody tr:hover td{background:color-mix(in srgb,var(--bg3) 70%, transparent);}
     <div class="nav-section-label" data-i18n-section="integrations">INTEGRATIONS</div>
     <div class="nav-item" onclick="showPage('asterisk',this)" id="nav-asterisk">
       <span class="nav-icon" data-icon="asterisk"></span>
-      <span class="nav-label" data-i18n="asterisk">Asterisk SIP</span>
+      <span class="nav-label" data-i18n="asterisk">SIP Client</span>
     </div>
     <div class="nav-item" onclick="showPage('dapnet',this)" id="nav-dapnet">
       <span class="nav-icon" data-icon="dapnet"></span>
@@ -3069,7 +3069,7 @@ tbody tr:hover td{background:color-mix(in srgb,var(--bg3) 70%, transparent);}
       <div class="hero">
         <span class="hero-dot is-idle" id="ast-hero-dot"></span>
         <div class="hero-main">
-          <div class="hero-title" data-i18n="asterisk_title">Asterisk SIP</div>
+          <div class="hero-title" data-i18n="asterisk_title">SIP Client (PBX)</div>
           <div class="hero-sub" id="ast-hero-sub">—</div>
         </div>
         <div class="hero-metrics">
@@ -3078,7 +3078,7 @@ tbody tr:hover td{background:color-mix(in srgb,var(--bg3) 70%, transparent);}
       </div>
       <div class="card">
         <div class="card-head">
-          <div class="card-title" data-i18n="asterisk_title">Asterisk SIP</div>
+          <div class="card-title" data-i18n="asterisk_title">SIP Client (PBX)</div>
           <div class="card-actions">
             <button class="btn btn-sm" onclick="loadAsteriskStatus()"><span class="btn-icon" data-icon="restart"></span><span data-i18n="refresh">Refresh</span></button>
           </div>
@@ -3098,7 +3098,8 @@ tbody tr:hover td{background:color-mix(in srgb,var(--bg3) 70%, transparent);}
           </div>
           <div class="info-grid">
             <div class="info-row"><div class="info-key" data-i18n="ast_sip_listen">SIP listen</div><div class="info-val" id="ast-sip-listen">—</div></div>
-            <div class="info-row"><div class="info-key" data-i18n="ast_remote">Remote Asterisk</div><div class="info-val" id="ast-remote">—</div></div>
+            <div class="info-row"><div class="info-key" data-i18n="ast_remote">SIP server</div><div class="info-val" id="ast-remote">—</div></div>
+            <div class="info-row"><div class="info-key" data-i18n="ast_outbound_proxy">Outbound proxy</div><div class="info-val" id="ast-outbound-proxy">—</div></div>
             <div class="info-row"><div class="info-key" data-i18n="ast_rtp">RTP ports</div><div class="info-val" id="ast-rtp">—</div></div>
             <div class="info-row"><div class="info-key" data-i18n="ast_codec">Codec</div><div class="info-val" id="ast-codec">—</div></div>
             <div class="info-row"><div class="info-key" data-i18n="ast_last_rx">Last RX</div><div class="info-val" id="ast-last-rx">—</div></div>
@@ -4238,7 +4239,7 @@ const LANGS={
   en:{
     bts_ip:'BTS IP',offline:'OFFLINE',online:'ONLINE',
     brew_online:'ONLINE',brew_offline:'OFFLINE',
-    stations:'Radios',calls:'Calls',lastheard:'Last Heard',log:'Log',rf:'RF',health:'Health',asterisk:'Asterisk SIP',dapnet:'DAPNET',echolink:'EchoLink',echolink_title:'EchoLink',meshcom:'MeshCom',meshcom_title:'MeshCom',geoalarm:'GeoAlarm',geoalarm_title:'GeoAlarm',config:'Config',
+    stations:'Radios',calls:'Calls',lastheard:'Last Heard',log:'Log',rf:'RF',health:'Health',asterisk:'SIP Client',dapnet:'DAPNET',echolink:'EchoLink',echolink_title:'EchoLink',meshcom:'MeshCom',meshcom_title:'MeshCom',geoalarm:'GeoAlarm',geoalarm_title:'GeoAlarm',config:'Config',
     sdslog:'SDS Log',th_dir:'Dir',th_from:'From',th_to:'To',th_message:'Message',no_sds:'No SDS messages yet',sds_refresh:'Refresh',
     rf_freq:'Center freq',rf_rate:'Sample rate',rf_rms:'RMS',rf_peak:'Peak',rf_age:'Snapshot',
     rf_waiting:'waiting…',rf_live:'live',rf_stale:'stale',
@@ -4253,8 +4254,8 @@ const LANGS={
     rf_temp_cold:'cold',rf_temp_nominal:'nominal',rf_temp_warm:'warm',rf_temp_hot:'hot',rf_temp_na:'no sensor',
     rf_no_gains:'unavailable',rf_just_now:'just now',
 
-    asterisk_title:'Asterisk SIP',ast_configured:'Configured',ast_register:'REGISTER',ast_sip_listen:'SIP listen',
-    ast_remote:'Remote Asterisk',ast_rtp:'RTP ports',ast_codec:'Codec',ast_last_rx:'Last RX',
+    asterisk_title:'SIP Client (PBX)',ast_configured:'Configured',ast_register:'REGISTER',ast_sip_listen:'SIP listen',
+    ast_remote:'SIP server',ast_outbound_proxy:'Outbound proxy',ast_rtp:'RTP ports',ast_codec:'Codec',ast_last_rx:'Last RX',
     ast_last_tx:'Last TX',ast_last_error:'Last error',
     dapnet_title:'DAPNET',dapnet_log:'DAPNET Log',dapnet_routing:'Routing',dapnet_send:'Send DAPNET Message',dapnet_saved:'✓ Saved',
     terminals:'Radios',registered:'registered',
@@ -4460,7 +4461,7 @@ const LANGS={
   de:{
     bts_ip:'BTS-IP',offline:'OFFLINE',online:'ONLINE',
     brew_online:'ONLINE',brew_offline:'OFFLINE',
-    stations:'Radios',calls:'Anrufe',lastheard:'Zuletzt Gehört',log:'Log',rf:'RF',health:'Health',asterisk:'Asterisk SIP',dapnet:'DAPNET',echolink:'EchoLink',echolink_title:'EchoLink',meshcom:'MeshCom',meshcom_title:'MeshCom',geoalarm:'GeoAlarm',geoalarm_title:'GeoAlarm',config:'Config',
+    stations:'Radios',calls:'Anrufe',lastheard:'Zuletzt Gehört',log:'Log',rf:'RF',health:'Health',asterisk:'SIP-Client',dapnet:'DAPNET',echolink:'EchoLink',echolink_title:'EchoLink',meshcom:'MeshCom',meshcom_title:'MeshCom',geoalarm:'GeoAlarm',geoalarm_title:'GeoAlarm',config:'Config',
     sdslog:'SDS-Log',th_dir:'Ri.',th_from:'Von',th_to:'An',th_message:'Nachricht',no_sds:'Noch keine SDS-Nachrichten',sds_refresh:'Aktualisieren',
     rf_freq:'Mittenfrequenz',rf_rate:'Abtastrate',rf_rms:'RMS',rf_peak:'Spitze',rf_age:'Aufnahme',
     rf_waiting:'wartet…',rf_live:'live',rf_stale:'veraltet',
@@ -4475,8 +4476,8 @@ const LANGS={
     rf_temp_cold:'kalt',rf_temp_nominal:'nominal',rf_temp_warm:'warm',rf_temp_hot:'heiß',rf_temp_na:'kein Sensor',
     rf_no_gains:'nicht verfügbar',rf_just_now:'gerade eben',
 
-    asterisk_title:'Asterisk SIP',ast_configured:'Konfiguriert',ast_register:'REGISTER',ast_sip_listen:'SIP hört auf',
-    ast_remote:'Remote Asterisk',ast_rtp:'RTP-Ports',ast_codec:'Codec',ast_last_rx:'Letztes RX',
+    asterisk_title:'SIP-Client (PBX)',ast_configured:'Konfiguriert',ast_register:'REGISTER',ast_sip_listen:'SIP hört auf',
+    ast_remote:'SIP-Server',ast_outbound_proxy:'Outbound-Proxy',ast_rtp:'RTP-Ports',ast_codec:'Codec',ast_last_rx:'Letztes RX',
     ast_last_tx:'Letztes TX',ast_last_error:'Letzter Fehler',
     dapnet_title:'DAPNET',dapnet_log:'DAPNET-Log',dapnet_routing:'Routing',dapnet_send:'DAPNET-Nachricht senden',dapnet_saved:'✓ Gespeichert',
     terminals:'Radios',registered:'registriert',
@@ -6571,7 +6572,7 @@ function exportLog(){
   setTimeout(()=>{URL.revokeObjectURL(a.href);a.remove();},0);
 }
 
-// ── Asterisk SIP ───────────────────────────────────────────────────────────
+// ── SIP Client (PBX) ─────────────────────────────────────────────────────────
 async function loadAsteriskStatus(){
   const set=(id,v)=>{const el=document.getElementById(id);if(el)el.textContent=(v===null||v===undefined||v==='')?'—':v;};
   try{
@@ -6585,6 +6586,7 @@ async function loadAsteriskStatus(){
     set('ast-dialogs', (rt.active_dialogs??0)+' active dialogs');
     set('ast-sip-listen', rt.sip_listen||c.sip_listen);
     set('ast-remote', rt.remote||c.remote);
+    set('ast-outbound-proxy', rt.outbound_proxy||c.outbound_proxy||'—');
     set('ast-rtp', rt.rtp_port_range||c.rtp_port_range);
     set('ast-codec', rt.codec||c.codec);
     set('ast-last-rx', rt.last_rx);
@@ -8380,9 +8382,9 @@ function renderHealthIntegrations(){
   grid.innerHTML='';
   if(healthIntegrationState.asterisk){
     const a=classifyAsteriskHealth(healthIntegrationState.asterisk);
-    grid.appendChild(integrationHealthCard('Asterisk SIP','asterisk','',a.level,a.detail,a.extra));
+    grid.appendChild(integrationHealthCard('SIP Client','asterisk','',a.level,a.detail,a.extra));
   } else {
-    grid.appendChild(integrationHealthCard('Asterisk SIP','asterisk','','degraded','status unavailable','Open the Asterisk SIP page or wait for the next refresh.'));
+    grid.appendChild(integrationHealthCard('SIP Client','asterisk','','degraded','status unavailable','Open the SIP Client page or wait for the next refresh.'));
   }
   if(healthIntegrationState.dapnet){
     const d=classifyDapnetHealth(healthIntegrationState.dapnet);

@@ -253,6 +253,7 @@ pub struct AsteriskEntity {
     asterisk_config: CfgAsterisk,
     sip_socket: UdpSocket,
     remote: SocketAddr,
+    outbound_proxy: Option<SocketAddr>,
     allowed_peers: Vec<IpAddr>,
     invite_rate: HashMap<IpAddr, (Instant, u32)>,
     dialogs: HashMap<Uuid, SipDialog>,
@@ -282,6 +283,19 @@ impl AsteriskEntity {
             .next()
             .ok_or_else(|| io::Error::new(io::ErrorKind::AddrNotAvailable, "asterisk remote address did not resolve"))?;
 
+        let outbound_proxy = if asterisk_config.outbound_proxy_host.trim().is_empty() {
+            None
+        } else {
+            Some(
+                (asterisk_config.outbound_proxy_host.as_str(), asterisk_config.outbound_proxy_port)
+                    .to_socket_addrs()?
+                    .next()
+                    .ok_or_else(|| {
+                        io::Error::new(io::ErrorKind::AddrNotAvailable, "asterisk outbound_proxy address did not resolve")
+                    })?,
+            )
+        };
+
         let allowed_peers = resolve_allowed_peers(&asterisk_config.allow_from);
 
         let entity = Self {
@@ -291,6 +305,7 @@ impl AsteriskEntity {
             asterisk_config,
             sip_socket,
             remote,
+            outbound_proxy,
             allowed_peers,
             invite_rate: HashMap::new(),
             dialogs: HashMap::new(),
@@ -314,7 +329,30 @@ impl AsteriskEntity {
     }
 
     fn remote_display(&self) -> String {
-        format!("{}:{}", self.asterisk_config.remote_host, self.asterisk_config.remote_port)
+        let server = format!("{}:{}", self.asterisk_config.remote_host, self.asterisk_config.remote_port);
+        match &self.outbound_proxy {
+            Some(proxy) => format!("{} (via {}:{})", server, proxy.ip(), proxy.port()),
+            None => server,
+        }
+    }
+
+    fn outbound_proxy_display(&self) -> String {
+        if self.asterisk_config.outbound_proxy_host.trim().is_empty() {
+            String::new()
+        } else {
+            format!(
+                "{}:{}",
+                self.asterisk_config.outbound_proxy_host, self.asterisk_config.outbound_proxy_port
+            )
+        }
+    }
+
+    fn sip_domain(&self) -> &str {
+        self.asterisk_config.from_domain.trim()
+    }
+
+    fn sip_send_target(&self) -> SocketAddr {
+        self.outbound_proxy.unwrap_or(self.remote)
     }
 
     fn rtp_range(&self) -> String {
@@ -329,6 +367,7 @@ impl AsteriskEntity {
             register_status: self.register_status.clone(),
             sip_listen: self.sip_listen(),
             remote: self.remote_display(),
+            outbound_proxy: self.outbound_proxy_display(),
             rtp_port_range: self.rtp_range(),
             codec: self.asterisk_config.codec.clone(),
             active_dialogs: self
@@ -380,12 +419,17 @@ impl AsteriskEntity {
     }
 
     fn request_uri(&self, number: &str) -> String {
-        format!("sip:{}@{}", number, self.asterisk_config.remote_host)
+        format!("sip:{}@{}", number, self.sip_domain())
+    }
+
+    fn register_uri(&self) -> String {
+        format!("sip:{}", self.sip_domain())
     }
 
     fn send_sip(&mut self, payload: String, summary: impl Into<String>) {
         let summary = summary.into();
-        match self.sip_socket.send_to(payload.as_bytes(), self.remote) {
+        let target = self.sip_send_target();
+        match self.sip_socket.send_to(payload.as_bytes(), target) {
             Ok(_) => {
                 self.last_tx = Some(summary);
             }
@@ -413,7 +457,7 @@ impl AsteriskEntity {
             return;
         }
 
-        let uri = format!("sip:{}", self.asterisk_config.remote_host);
+        let uri = self.register_uri();
         let branch = self.next_branch();
         let cseq = self.register_cseq;
         self.register_cseq = self.register_cseq.saturating_add(1);
@@ -452,7 +496,7 @@ impl AsteriskEntity {
     }
 
     fn send_options(&mut self) {
-        let uri = format!("sip:{}", self.asterisk_config.remote_host);
+        let uri = self.register_uri();
         let branch = self.next_branch();
         let request = format!(
             "OPTIONS {} SIP/2.0\r\n\
@@ -853,8 +897,10 @@ impl AsteriskEntity {
     }
 
     fn peer_allowed(&self, addr: SocketAddr) -> bool {
-        // Port is not pinned: Asterisk answers from whatever source port it likes.
-        addr.ip() == self.remote.ip() || self.allowed_peers.contains(&addr.ip())
+        // Port is not pinned: the PBX or outbound proxy answers from whatever source port it likes.
+        addr.ip() == self.remote.ip()
+            || self.outbound_proxy.is_some_and(|proxy| addr.ip() == proxy.ip())
+            || self.allowed_peers.contains(&addr.ip())
     }
 
     /// Sliding-ish window per source. Each INVITE costs an RTP port, a codec and a CMCE setup,
