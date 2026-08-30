@@ -324,3 +324,36 @@ pub fn apply_asterisk_patch(src: CfgAsteriskDto) -> Result<CfgAsterisk, String> 
         max_invites_per_minute: src.max_invites_per_minute,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn proxy_empty_is_direct() {
+        let cfg = apply_asterisk_patch(CfgAsteriskDto::default()).unwrap();
+        assert!(cfg.outbound_proxy_host.is_empty());
+        assert_eq!(cfg.outbound_proxy_port, 5060);
+    }
+
+    #[test]
+    fn proxy_port_zero_rejected_when_host_set() {
+        let mut dto = CfgAsteriskDto::default();
+        dto.enabled = true;
+        dto.outbound_proxy_host = "proxy.example.com".into();
+        dto.outbound_proxy_port = 0;
+        let err = apply_asterisk_patch(dto).unwrap_err();
+        assert!(err.contains("outbound_proxy_port"));
+    }
+
+    #[test]
+    fn proxy_host_trimmed() {
+        let mut dto = CfgAsteriskDto::default();
+        dto.outbound_proxy_host = "  10.0.0.1  ".into();
+        dto.outbound_proxy_port = 5080;
+        let cfg = apply_asterisk_patch(dto).unwrap();
+        assert_eq!(cfg.outbound_proxy_host, "10.0.0.1");
+        assert_eq!(cfg.outbound_proxy_port, 5080);
+    }
+}
+

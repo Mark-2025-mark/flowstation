@@ -3106,6 +3106,81 @@ tbody tr:hover td{background:color-mix(in srgb,var(--bg3) 70%, transparent);}
             <div class="info-row"><div class="info-key" data-i18n="ast_last_tx">Last TX</div><div class="info-val" id="ast-last-tx">—</div></div>
             <div class="info-row"><div class="info-key" data-i18n="ast_last_error">Last error</div><div class="info-val" id="ast-last-error">—</div></div>
           </div>
+          <div id="ast-msg" class="sds-empty" style="margin-top:12px;min-height:16px"></div>
+        </div>
+      </div>
+
+      <div class="card" id="ast-install-card">
+        <div class="card-head">
+          <div class="card-title" data-i18n="ast_install_title">Install SIP Client</div>
+          <div class="card-actions">
+            <button class="btn btn-primary" id="ast-install-btn" onclick="installSipClient()"><span class="btn-icon" data-icon="update"></span><span data-i18n="ast_install">Install</span></button>
+          </div>
+        </div>
+        <div class="card-body">
+          <p class="sds-empty" id="ast-install-help" data-i18n="ast_install_help">Compiles tetra-codec and rebuilds FlowStation with SIP support. On a Raspberry Pi 3B+ this takes 15–40 minutes; the station restarts when it finishes. Does not install a local PBX — you keep using your existing Asterisk or FreeSWITCH.</p>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-head">
+          <div class="card-title" data-i18n="ast_account">SIP account (Zoiper-style)</div>
+          <div class="card-actions">
+            <button class="btn btn-sm" onclick="loadAsteriskStatus()"><span class="btn-icon" data-icon="restart"></span><span data-i18n="refresh">Refresh</span></button>
+            <button class="btn btn-primary" onclick="saveAsterisk()"><span class="btn-icon" data-icon="save"></span><span data-i18n="save">Save</span></button>
+          </div>
+        </div>
+        <div class="card-body">
+          <label class="sw-row">
+            <span class="sw-text" data-i18n="ast_enable">Enable SIP client (register as a PBX extension)</span>
+            <span class="sw"><input type="checkbox" id="ast-enabled-input"><i></i></span>
+          </label>
+          <label class="sw-row">
+            <span class="sw-text" data-i18n="ast_register_enable">REGISTER with the PBX</span>
+            <span class="sw"><input type="checkbox" id="ast-register-input"><i></i></span>
+          </label>
+          <label class="sw-row">
+            <span class="sw-text" data-i18n="ast_strip_prefix">Strip outbound prefix before dialling SIP</span>
+            <span class="sw"><input type="checkbox" id="ast-strip-prefix"><i></i></span>
+          </label>
+
+          <div class="h-form" style="margin-top:14px;grid-template-columns:repeat(auto-fit,minmax(220px,1fr))">
+            <label class="h-flabel" data-i18n="ast_local_user">Extension / username</label>
+            <input type="text" id="ast-local-user" class="form-input" autocomplete="off" spellcheck="false" placeholder="1001">
+            <label class="h-flabel" data-i18n="ast_auth_user">Auth username</label>
+            <input type="text" id="ast-auth-user" class="form-input" autocomplete="off" spellcheck="false" placeholder="1001">
+            <label class="h-flabel" data-i18n="ast_password">Password</label>
+            <input type="password" id="ast-password" class="form-input" autocomplete="new-password" spellcheck="false" oninput="astPasswordDirty=true">
+            <label class="h-flabel" data-i18n="ast_domain">SIP domain</label>
+            <input type="text" id="ast-from-domain" class="form-input" placeholder="pbx.example.com">
+            <label class="h-flabel" data-i18n="ast_realm">Auth realm</label>
+            <input type="text" id="ast-realm" class="form-input" placeholder="pbx.example.com">
+            <label class="h-flabel" data-i18n="ast_remote_host">SIP server</label>
+            <input type="text" id="ast-remote-host" class="form-input" placeholder="pbx.example.com">
+            <label class="h-flabel" data-i18n="ast_remote_port">SIP port</label>
+            <input type="number" id="ast-remote-port" class="form-input" min="1" max="65535" placeholder="5060">
+            <label class="h-flabel" data-i18n="ast_outbound_proxy_host">Outbound proxy (optional)</label>
+            <input type="text" id="ast-proxy-host" class="form-input" placeholder="leave empty for direct">
+            <label class="h-flabel" data-i18n="ast_outbound_proxy_port">Proxy port</label>
+            <input type="number" id="ast-proxy-port" class="form-input" min="1" max="65535" placeholder="5060">
+            <label class="h-flabel" data-i18n="ast_contact_host">Contact / public IP of this Pi</label>
+            <input type="text" id="ast-contact-host" class="form-input" placeholder="192.168.1.50">
+            <label class="h-flabel" data-i18n="ast_bind_addr">Listen address</label>
+            <input type="text" id="ast-bind-addr" class="form-input" placeholder="0.0.0.0">
+            <label class="h-flabel" data-i18n="ast_bind_port">Listen port</label>
+            <input type="number" id="ast-bind-port" class="form-input" min="1" max="65535" placeholder="5062">
+            <label class="h-flabel" data-i18n="ast_out_prefix">Outbound prefix (TETRA → SIP)</label>
+            <input type="text" id="ast-out-prefix" class="form-input" placeholder="91">
+            <label class="h-flabel" data-i18n="ast_in_prefix">Inbound prefix (SIP → TETRA)</label>
+            <input type="text" id="ast-in-prefix" class="form-input" placeholder="T">
+            <label class="h-flabel" data-i18n="ast_rtp_min">RTP port min</label>
+            <input type="number" id="ast-rtp-min" class="form-input" min="1" max="65535" placeholder="30000">
+            <label class="h-flabel" data-i18n="ast_rtp_max">RTP port max</label>
+            <input type="number" id="ast-rtp-max" class="form-input" min="1" max="65535" placeholder="30100">
+            <label class="h-flabel top" data-i18n="ast_service_numbers">Allowed SIP numbers</label>
+            <textarea id="ast-service-numbers" class="form-input" rows="3" placeholder="600&#10;385"></textarea>
+          </div>
+          <p class="sds-empty" style="margin-top:10px" data-i18n="ast_save_help">Save writes config.toml. If the SIP client is already installed, FlowStation restarts to register with the PBX. Group calls, Brew, SDS and the rest of the stack are unchanged.</p>
         </div>
       </div>
 
@@ -4257,6 +4332,21 @@ const LANGS={
     asterisk_title:'SIP Client (PBX)',ast_configured:'Configured',ast_register:'REGISTER',ast_sip_listen:'SIP listen',
     ast_remote:'SIP server',ast_outbound_proxy:'Outbound proxy',ast_rtp:'RTP ports',ast_codec:'Codec',ast_last_rx:'Last RX',
     ast_last_tx:'Last TX',ast_last_error:'Last error',
+    ast_install_title:'Install SIP Client',ast_install:'Install',ast_install_help:'Compiles tetra-codec and rebuilds FlowStation with SIP support. On a Raspberry Pi 3B+ this takes 15–40 minutes; the station restarts when it finishes. Does not install a local PBX — you keep using your existing Asterisk or FreeSWITCH.',
+    ast_install_confirm:'Install the SIP client now?\n\nThis compiles tetra-codec and rebuilds FlowStation with SIP support (15–40 min on a Pi 3B+). The station restarts when done. Group calls, Brew, SDS and other features stay in place.',
+    ast_install_running:'Installing SIP client…',
+    ast_account:'SIP account (Zoiper-style)',ast_enable:'Enable SIP client (register as a PBX extension)',
+    ast_register_enable:'REGISTER with the PBX',ast_strip_prefix:'Strip outbound prefix before dialling SIP',
+    ast_local_user:'Extension / username',ast_auth_user:'Auth username',ast_password:'Password',
+    ast_domain:'SIP domain',ast_realm:'Auth realm',ast_remote_host:'SIP server',ast_remote_port:'SIP port',
+    ast_outbound_proxy_host:'Outbound proxy (optional)',ast_outbound_proxy_port:'Proxy port',
+    ast_contact_host:'Contact / public IP of this Pi',ast_bind_addr:'Listen address',ast_bind_port:'Listen port',
+    ast_out_prefix:'Outbound prefix (TETRA → SIP)',ast_in_prefix:'Inbound prefix (SIP → TETRA)',
+    ast_rtp_min:'RTP port min',ast_rtp_max:'RTP port max',ast_service_numbers:'Allowed SIP numbers',
+    ast_save_help:'Save writes config.toml. If the SIP client is already installed, FlowStation restarts to register with the PBX. Group calls, Brew, SDS and the rest of the stack are unchanged.',
+    ast_saved:'✓ Saved',ast_saved_restart:'✓ Saved — restarting to apply',ast_need_install:'Saved. Click Install to compile the SIP bridge.',
+    ast_ready:'SIP client ready',ast_not_compiled:'SIP client not compiled in this binary',
+    ast_no_codec:'tetra-codec not installed',
     dapnet_title:'DAPNET',dapnet_log:'DAPNET Log',dapnet_routing:'Routing',dapnet_send:'Send DAPNET Message',dapnet_saved:'✓ Saved',
     terminals:'Radios',registered:'registered',
     active_calls:'Active Calls',circuits:'circuits in use',
@@ -4566,6 +4656,10 @@ const LANGS={
     clear:'Limpiar',export:'Exportar',restart:'Reiniciar',shutdown:'Apagar',save:'Guardar',
     cfg_sec_configuration:'Configuración',cfg_sec_access:'Control de acceso',cfg_sec_wx:'WX / METAR',whitelist_title:'Lista blanca ISSI',whitelist_add:'Añadir ISSI',whitelist_empty:'Lista vacía — red abierta (cualquier radio puede registrarse).',
     whitelist_help:'Cuando la lista está vacía, cualquier radio puede registrarse (red abierta). Con entradas, solo se aceptan los ISSI listados; el resto se rechazan. Los cambios se aplican al instante y persisten tras reiniciar.',
+    asterisk:'Cliente SIP',asterisk_title:'Cliente SIP (PBX)',ast_install:'Instalar',ast_install_title:'Instalar cliente SIP',
+    ast_account:'Cuenta SIP (estilo Zoiper)',ast_enable:'Activar cliente SIP (registrarse como extensión PBX)',
+    ast_install_confirm:'¿Instalar el cliente SIP ahora?\n\nCompila tetra-codec y reconstruye FlowStation con soporte SIP (15–40 min en una Pi 3B+). La estación se reinicia al terminar. Las llamadas de grupo, Brew y SDS se conservan.',
+    ast_saved_restart:'✓ Guardado — reiniciando para aplicar',ast_need_install:'Guardado. Pulsa Instalar para compilar el puente SIP.',
     whitelist_enforced:'ACTIVA',whitelist_open:'ABIERTA',whitelist_invalid:'Introduce un ISSI válido (1–16777215).',
     wx_title:'Servicio WX / METAR',wx_help:'Servicio meteorológico integrado. Las radios envían un SDS como "METAR LROP" al ISSI del servicio y reciben un informe decodificado. Opcionalmente envía automáticamente el METAR de una estación fija a un ISSI o grupo a intervalos. Datos de aviationweather.gov.',
     wx_enabled:'Activar respuesta METAR a petición',wx_service_issi:'ISSI del servicio',wx_periodic_enabled:'Activar envío periódico',
@@ -6573,6 +6667,22 @@ function exportLog(){
 }
 
 // ── SIP Client (PBX) ─────────────────────────────────────────────────────────
+let astPasswordDirty=false;
+function setAstMsg(txt,ok){
+  const el=document.getElementById('ast-msg');
+  if(!el)return;
+  el.textContent=txt||'';
+  el.style.color=ok?'var(--accent)':'var(--danger)';
+}
+function astVal(id){return (document.getElementById(id)?.value||'').trim();}
+function astNum(id,def,min,max){
+  const n=parseInt(document.getElementById(id)?.value,10);
+  if(!Number.isFinite(n))return def;
+  return Math.min(max,Math.max(min,n));
+}
+function astList(id){
+  return (document.getElementById(id)?.value||'').split(/[\s,]+/).map(s=>s.trim()).filter(Boolean);
+}
 async function loadAsteriskStatus(){
   const set=(id,v)=>{const el=document.getElementById(id);if(el)el.textContent=(v===null||v===undefined||v==='')?'—':v;};
   try{
@@ -6592,22 +6702,89 @@ async function loadAsteriskStatus(){
     set('ast-last-rx', rt.last_rx);
     set('ast-last-tx', rt.last_tx);
     set('ast-last-error', rt.last_error);
-    // Hero connection pill — driven by the live REGISTER state.
     const enabled=!!(c.enabled||rt.enabled);
     const reg=(rt.register_status||'').toLowerCase();
     const registered=/regist|ok|online|200/.test(reg)&&!/fail|error|unreach|timeout/.test(reg);
-    setIntegrationHero('ast', enabled, registered, rt.register_status||(enabled?t('offline'):'disabled'),
+    const ready=!!d.ready;
+    let pill=rt.register_status||(enabled?t('offline'):'disabled');
+    if(!ready) pill=d.compiled?(t('ast_no_codec')):(t('ast_not_compiled'));
+    setIntegrationHero('ast', enabled && ready, registered && ready, pill,
       (c.configured||rt.configured)?(rt.sip_listen||c.sip_listen||''):'');
     const cc=document.getElementById('ast-configured-card');
     if(cc){cc.classList.remove('is-ok','is-danger','is-idle');cc.classList.add((c.configured||rt.configured)?'is-ok':'is-idle');}
     const rc=document.getElementById('ast-register-card');
-    if(rc){rc.classList.remove('is-ok','is-warn','is-danger','is-idle');rc.classList.add(registered?'is-ok':enabled?'is-warn':'is-idle');}
+    if(rc){rc.classList.remove('is-ok','is-warn','is-danger','is-idle');rc.classList.add(registered&&ready?'is-ok':enabled?'is-warn':'is-idle');}
+    const installCard=document.getElementById('ast-install-card');
+    if(installCard) installCard.style.display=ready?'none':'';
+    const en=document.getElementById('ast-enabled-input'); if(en) en.checked=!!c.enabled;
+    const rg=document.getElementById('ast-register-input'); if(rg) rg.checked=c.register!==false;
+    const sp=document.getElementById('ast-strip-prefix'); if(sp) sp.checked=c.strip_outbound_prefix!==false;
+    const fill=(id,v)=>{const el=document.getElementById(id);if(el&&v!==undefined&&v!==null)el.value=v;};
+    fill('ast-local-user',c.local_user||'');
+    fill('ast-auth-user',c.auth_user||'');
+    fill('ast-from-domain',c.from_domain||'');
+    fill('ast-realm',c.realm||'');
+    fill('ast-remote-host',c.remote_host||'');
+    fill('ast-remote-port',c.remote_port||5060);
+    fill('ast-proxy-host',c.outbound_proxy_host||'');
+    fill('ast-proxy-port',c.outbound_proxy_port||5060);
+    fill('ast-contact-host',c.contact_host||'');
+    fill('ast-bind-addr',c.bind_addr||'0.0.0.0');
+    fill('ast-bind-port',c.bind_port||5062);
+    fill('ast-out-prefix',c.outbound_prefix||'91');
+    fill('ast-in-prefix',c.inbound_prefix||'T');
+    fill('ast-rtp-min',c.rtp_port_min||30000);
+    fill('ast-rtp-max',c.rtp_port_max||30100);
+    fill('ast-service-numbers',(c.service_numbers||[]).join('\n'));
+    const pw=document.getElementById('ast-password');
+    if(pw && !astPasswordDirty) pw.value=c.password_set?(c.password_masked||''):'';
+    astPasswordDirty=false;
   }catch(e){
     set('ast-configured','—');set('ast-enabled','status unavailable');set('ast-register','—');
     set('ast-last-error',t('conn_error'));
     setIntegrationHero('ast', false, false, t('conn_error'), '');
   }
 }
+async function saveAsterisk(){
+  const body={
+    enabled:!!document.getElementById('ast-enabled-input')?.checked,
+    register:!!document.getElementById('ast-register-input')?.checked,
+    strip_outbound_prefix:!!document.getElementById('ast-strip-prefix')?.checked,
+    local_user:astVal('ast-local-user'),
+    auth_user:astVal('ast-auth-user')||astVal('ast-local-user'),
+    from_domain:astVal('ast-from-domain'),
+    realm:astVal('ast-realm')||astVal('ast-from-domain'),
+    remote_host:astVal('ast-remote-host'),
+    remote_port:astNum('ast-remote-port',5060,1,65535),
+    outbound_proxy_host:astVal('ast-proxy-host'),
+    outbound_proxy_port:astNum('ast-proxy-port',5060,1,65535),
+    contact_host:astVal('ast-contact-host')||astVal('ast-remote-host'),
+    bind_addr:astVal('ast-bind-addr')||'0.0.0.0',
+    bind_port:astNum('ast-bind-port',5062,1,65535),
+    outbound_prefix:astVal('ast-out-prefix'),
+    inbound_prefix:astVal('ast-in-prefix'),
+    rtp_port_min:astNum('ast-rtp-min',30000,1,65535),
+    rtp_port_max:astNum('ast-rtp-max',30100,1,65535),
+    service_numbers:astList('ast-service-numbers'),
+    codec:'PCMU'
+  };
+  if(astPasswordDirty) body.password=astVal('ast-password');
+  try{
+    const r=await fetch('/api/asterisk',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    const txt=await r.text();
+    let d={};
+    try{d=JSON.parse(txt);}catch{d={message:txt};}
+    if(!r.ok){setAstMsg(t('save_fail')+': '+(d.message||txt),false);return;}
+    astPasswordDirty=false;
+    if(d.restart){setAstMsg(t('ast_saved_restart'),true);}
+    else {setAstMsg(d.message||t('ast_need_install'),true);}
+    loadAsteriskStatus();
+  }catch{setAstMsg(t('conn_error'),false);}
+}
+function installSipClient(){
+  startLoggedJob('/api/asterisk/install', t('ast_install_title'), t('ast_install_confirm'), t('ast_install_running'));
+}
+
 // Shared helper: drive an integration tab's hero dot + connection pill from
 // (enabled, connected) state. Calm severity language: connected=ok, enabled-but-down=warn,
 // disabled=idle. No color literals — all via .hero-dot/.pill variants.
@@ -7360,19 +7537,19 @@ function deleteDgnaGroupEverywhere(gssiArg){
 }
 setInterval(refreshOpenDgna,1000);
 
-// ── OTA Update ────────────────────────────────────────────────────────────
+// ── OTA Update / SIP install (shared log modal) ───────────────────────────
 let updatePollTimer=null;
 function closeUpdateModal(){document.getElementById('update-modal').classList.remove('open');if(updatePollTimer){clearInterval(updatePollTimer);updatePollTimer=null;}}
-async function startUpdate(){
-  if(!confirm(t('update_confirm')))return;
+async function startLoggedJob(url, title, confirmMsg, runningMsg){
+  if(confirmMsg && !confirm(confirmMsg))return;
   document.getElementById('update-modal').classList.add('open');
-  document.getElementById('update-modal-title').textContent=t('update_title');
+  document.getElementById('update-modal-title').textContent=title||t('update_title');
   const termEl=document.getElementById('update-terminal');
   const msgEl=document.getElementById('update-status-msg');
   const closeBtn=document.getElementById('update-close-btn');
-  termEl.textContent='';msgEl.className='update-status running';msgEl.textContent=t('update_running');closeBtn.disabled=true;
+  termEl.textContent='';msgEl.className='update-status running';msgEl.textContent=runningMsg||t('update_running');closeBtn.disabled=true;
   try{
-    const r=await fetch('/api/update',{method:'POST'});
+    const r=await fetch(url,{method:'POST'});
     if(!r.ok&&r.status!==409){msgEl.className='update-status err';msgEl.textContent='✗ '+await r.text();closeBtn.disabled=false;return;}
   }catch(e){msgEl.className='update-status err';msgEl.textContent='✗ '+e.message;closeBtn.disabled=false;return;}
   let lastLen=0;
@@ -7385,6 +7562,9 @@ async function startUpdate(){
       else if(j.status==='done_err'){clearInterval(updatePollTimer);updatePollTimer=null;msgEl.className='update-status err';msgEl.textContent=t('update_done_err');closeBtn.disabled=false;}
     }catch{}
   },1000);
+}
+async function startUpdate(){
+  startLoggedJob('/api/update', t('update_title'), t('update_confirm'), t('update_running'));
 }
 
 // ── System tab ────────────────────────────────────────────────────────────
@@ -8320,6 +8500,9 @@ function integrationHealthCard(title,iconKey,accent,level,detail,extra){
 }
 function classifyAsteriskHealth(data){
   const c=(data&&data.config)||{},rt=(data&&data.runtime)||{};
+  if(data && data.install_needed){
+    return {level:'degraded',detail:data.compiled?'tetra-codec missing':'not installed',extra:'Open SIP Client and click Install to compile the bridge.'};
+  }
   const enabled=!!(c.enabled||rt.enabled);
   if(!enabled)return {level:'ok',detail:'disabled',extra:'SIP bridge is configured but not active.'};
   const reg=String(rt.register_status||'').toLowerCase();

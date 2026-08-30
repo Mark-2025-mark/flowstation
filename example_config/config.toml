@@ -833,7 +833,9 @@ voice_service = true
 #   contact_host   = public IP/hostname the PBX uses to reach this Pi (NAT)
 #
 # NOTE: SIP voice bridge is FEATURE-GATED on FlowStation. The default build does NOT
-# include it. To use this section the device binary must be built with
+# include it. Preferred: open the dashboard SIP Client page, fill the account, click
+# Install (compiles tetra-codec + rebuilds with --features asterisk), then Save.
+# Manual alternative:
 #   cargo build --release --features asterisk
 # and requires the native tetra-codec (outerplane) ACELP library installed. The
 # default build (DAPNET / Snom / GeoAlarm / dashboard) works without it.

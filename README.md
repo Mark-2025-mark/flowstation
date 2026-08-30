@@ -293,6 +293,14 @@ This bridge requires a build with `--features asterisk` and the native
 `tetra-codec` library (see the note at the top of this section); it is not part of
 the default build.
 
+**From the dashboard (plug-and-play):** open **SIP Client**, fill the Zoiper-style
+account (server, optional outbound proxy, extension, password), click **Install**,
+wait until the log finishes, then **Save**. Install compiles `tetra-codec`, rebuilds
+FlowStation with SIP support, and restarts the service. It does **not** install a
+local Asterisk — the radios become an extension of the PBX you already run
+(Asterisk, FreeSWITCH, 3CX, …). Later OTA updates keep `--features asterisk` so SIP
+is not dropped on the next upgrade.
+
 **Zoiper-style account mapping** (config section name stays `[asterisk]` for
 compatibility):
 
