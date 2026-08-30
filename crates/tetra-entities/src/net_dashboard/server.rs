@@ -800,11 +800,46 @@ fn run_update(update: SharedUpdateState, config_path: String, source_dir_overrid
     // Step 7: build. cargo lives in ~/.cargo/bin, which the systemd service PATH usually omits, so
     // resolve it explicitly and put its directory on PATH for the rustc/rustup shims (FH-BUG-037).
     // Output is streamed live so a long compile shows progress instead of looking hung (FH-BUG-035).
-    log!(update, "--- cargo build --release ---");
+    let with_asterisk = crate::net_dashboard::asterisk::sip_client_should_build(&src_dir);
+    if !run_cargo_release_build(&update, &src_dir, with_asterisk) {
+        return;
+    }
+
+    // Step 8: done — schedule restart.
+    log!(update, "--- Build successful. Restarting service in 2s... ---");
+    update.lock().unwrap().finish(true);
+
+    crate::service_control::schedule_service_action(crate::service_control::ServiceAction::Restart, std::time::Duration::from_secs(2));
+}
+
+/// `cargo build --release`, optionally with `--features asterisk`. Resolves cargo the same way
+/// as OTA (FH-BUG-037) and streams output into the shared update log.
+fn run_cargo_release_build(update: &SharedUpdateState, src_dir: &std::path::Path, with_asterisk: bool) -> bool {
+    macro_rules! log {
+        ($update:expr, $($arg:tt)*) => {{
+            let line = format!($($arg)*);
+            tracing::info!("UPDATE: {}", line);
+            $update.lock().unwrap().append(&line);
+        }};
+    }
+
     let cargo = find_cargo();
     log!(update, "Using cargo: {}", cargo.display());
+    let mut args: Vec<String> = vec!["build".into(), "--release".into()];
+    if with_asterisk {
+        args.push("--features".into());
+        args.push("asterisk".into());
+        log!(update, "--- cargo build --release --features asterisk ---");
+    } else {
+        log!(update, "--- cargo build --release ---");
+    }
     let mut build = std::process::Command::new(&cargo);
-    build.args(["build", "--release"]).current_dir(&src_dir);
+    build.args(&args).current_dir(src_dir);
+    if let Ok(pkg) = std::env::var("PKG_CONFIG_PATH") {
+        build.env("PKG_CONFIG_PATH", pkg);
+    } else {
+        build.env("PKG_CONFIG_PATH", "/usr/local/lib/pkgconfig:/usr/lib/pkgconfig");
+    }
     // Put cargo's own directory on PATH so the rustc/rustup shims resolve under the service's minimal
     // PATH. Only for an ABSOLUTE cargo: a bare "cargo" has an empty parent, and prepending "" (or
     // appending to an empty PATH) injects an empty entry that Unix treats as the current directory —
@@ -818,14 +853,220 @@ fn run_update(update: SharedUpdateState, config_path: String, source_dir_overrid
             build.env("PATH", new_path);
         }
     }
-    if stream_cmd(&update, build, "$ cargo build --release".to_string()).is_none() {
+    let label = format!("$ cargo {}", args.join(" "));
+    stream_cmd(update, build, label).is_some()
+}
+
+fn command_exists(name: &str) -> bool {
+    std::process::Command::new("sh")
+        .args(["-c", &format!("command -v {name} >/dev/null 2>&1")])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+fn is_root() -> bool {
+    #[cfg(unix)]
+    {
+        // SAFETY: geteuid() is always successful and has no preconditions.
+        unsafe { libc::geteuid() == 0 }
+    }
+    #[cfg(not(unix))]
+    {
+        false
+    }
+}
+
+/// Run `program args`, falling back to `sudo -n program args` when not root.
+fn run_maybe_sudo(update: &SharedUpdateState, program: &str, args: &[&str], dir: &std::path::Path) -> Option<String> {
+    let label = format!("$ {} {}", program, args.join(" "));
+    tracing::info!("UPDATE: {}", label);
+    let mut cmd = std::process::Command::new(program);
+    cmd.args(args).current_dir(dir);
+    cmd.env("DEBIAN_FRONTEND", "noninteractive");
+    if stream_cmd(update, cmd, label.clone()).is_some() {
+        return Some(String::new());
+    }
+    if is_root() || !command_exists("sudo") {
+        return None;
+    }
+    // The previous stream_cmd already marked the job failed. Reset to running so sudo can retry.
+    {
+        let mut u = update.lock().unwrap();
+        u.phase = UpdatePhase::Running;
+        u.append("retrying with sudo -n …");
+    }
+    let mut sudo_args = vec!["-n", program];
+    sudo_args.extend_from_slice(args);
+    let sudo_label = format!("$ sudo -n {} {}", program, args.join(" "));
+    let mut cmd = std::process::Command::new("sudo");
+    cmd.args(&sudo_args).current_dir(dir);
+    cmd.env("DEBIAN_FRONTEND", "noninteractive");
+    stream_cmd(update, cmd, sudo_label).map(|_| String::new())
+}
+
+/// Install tetra-codec, rebuild FlowStation with `--features asterisk`, write the OTA marker,
+/// then restart. Reuses the OTA log/status channel so the dashboard modal can stream progress.
+fn run_sip_install(update: SharedUpdateState, source_dir_override: Option<String>) {
+    macro_rules! log {
+        ($update:expr, $($arg:tt)*) => {{
+            let line = format!($($arg)*);
+            tracing::info!("UPDATE: {}", line);
+            $update.lock().unwrap().append(&line);
+        }};
+    }
+
+    log!(update, "=== FlowStation SIP Client install ===");
+    log!(update, "This compiles tetra-codec and rebuilds FlowStation with --features asterisk.");
+    log!(update, "On a Raspberry Pi 3B+ this can take 15–40 minutes. Do not power off.");
+
+    let src_dir = match resolve_source_dir(source_dir_override.as_deref()) {
+        Ok(p) => p,
+        Err(e) => {
+            log!(update, "ERROR: {}", e);
+            update.lock().unwrap().finish(false);
+            return;
+        }
+    };
+    log!(update, "Source dir: {}", src_dir.display());
+    if let Err(e) = source_tree_is_trusted(&src_dir) {
+        log!(update, "ERROR: {}", e);
+        update.lock().unwrap().finish(false);
         return;
     }
 
-    // Step 8: done — schedule restart.
-    log!(update, "--- Build successful. Restarting service in 2s... ---");
-    update.lock().unwrap().finish(true);
+    fn run_cmd(update: &SharedUpdateState, program: &str, args: &[&str], dir: &std::path::Path) -> Option<String> {
+        let label = format!("$ {} {}", program, args.join(" "));
+        tracing::info!("UPDATE: {}", label);
+        let mut cmd = std::process::Command::new(program);
+        cmd.args(args).current_dir(dir);
+        stream_cmd(update, cmd, label)
+    }
 
+    // Build tools. Missing packages are installed via apt when available; already-present
+    // tools skip apt so a machine without network but with cmake still works.
+    let need_apt = ["git", "cmake", "pkg-config", "g++"].iter().any(|c| !command_exists(c));
+    if need_apt {
+        if command_exists("apt-get") {
+            log!(update, "--- Installing build packages (cmake, g++, git, pkg-config) ---");
+            let apt_ok = run_maybe_sudo(
+                &update,
+                "apt-get",
+                &[
+                    "install",
+                    "-y",
+                    "--no-install-recommends",
+                    "cmake",
+                    "g++",
+                    "make",
+                    "pkg-config",
+                    "git",
+                    "ca-certificates",
+                ],
+                &src_dir,
+            )
+            .is_some();
+            if !apt_ok {
+                log!(update, "ERROR: could not install build packages. Install cmake g++ git pkg-config and retry.");
+                return;
+            }
+        } else {
+            log!(update, "ERROR: git/cmake/pkg-config missing and apt-get is not available.");
+            update.lock().unwrap().finish(false);
+            return;
+        }
+    } else {
+        log!(update, "Build tools already present (git, cmake, pkg-config).");
+    }
+
+    // tetra-codec: clone or update a well-known path, never an operator-supplied URL.
+    let codec_dir = {
+        let opt = std::path::PathBuf::from("/opt/tetra-codec");
+        if opt.exists() || is_root() || opt.parent().is_some_and(|p| p.is_dir()) {
+            opt
+        } else {
+            src_dir.join("vendor/tetra-codec")
+        }
+    };
+    if let Some(parent) = codec_dir.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    log!(update, "--- tetra-codec at {} ---", codec_dir.display());
+    if codec_dir.join(".git").exists() {
+        if run_cmd(&update, "git", &["-C", codec_dir.to_str().unwrap_or("."), "pull", "--ff-only"], &codec_dir).is_none() {
+            log!(update, "WARNING: git pull failed; building the existing checkout.");
+            {
+                let mut u = update.lock().unwrap();
+                u.phase = UpdatePhase::Running;
+            }
+        }
+    } else {
+        if let Some(parent) = codec_dir.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if run_cmd(
+            &update,
+            "git",
+            &[
+                "clone",
+                "--depth",
+                "1",
+                "https://github.com/outerplane/tetra-codec.git",
+                codec_dir.to_str().unwrap_or("tetra-codec"),
+            ],
+            codec_dir.parent().unwrap_or(&src_dir),
+        )
+        .is_none()
+        {
+            return;
+        }
+    }
+
+    log!(update, "--- cmake configure / build / install tetra-codec ---");
+    if run_cmd(
+        &update,
+        "cmake",
+        &["-B", "build", "-DCMAKE_BUILD_TYPE=Release", "-DCMAKE_INSTALL_PREFIX=/usr/local"],
+        &codec_dir,
+    )
+    .is_none()
+    {
+        return;
+    }
+    // Pi 3B+ is RAM-limited; two compile jobs is enough without swapping the box to death.
+    if run_cmd(&update, "cmake", &["--build", "build", "--parallel", "2"], &codec_dir).is_none() {
+        return;
+    }
+    if run_maybe_sudo(&update, "cmake", &["--install", "build"], &codec_dir).is_none() {
+        return;
+    }
+    let _ = run_maybe_sudo(&update, "ldconfig", &[], &codec_dir);
+    {
+        let mut u = update.lock().unwrap();
+        if matches!(u.phase, UpdatePhase::Done { success: false }) {
+            u.phase = UpdatePhase::Running;
+            u.append("ldconfig skipped or failed; linker rpath should still find /usr/local/lib.");
+        }
+    }
+
+    if !crate::net_dashboard::asterisk::tetra_codec_installed() {
+        log!(update, "WARNING: pkg-config still cannot see tetra-codec; continuing with /usr/local/lib rpath.");
+    } else {
+        log!(update, "✓ tetra-codec is visible to pkg-config.");
+    }
+
+    if !run_cargo_release_build(&update, &src_dir, true) {
+        return;
+    }
+
+    if let Err(e) = crate::net_dashboard::asterisk::write_sip_client_marker(&src_dir) {
+        log!(update, "WARNING: could not write SIP feature marker: {e}");
+    } else {
+        log!(update, "✓ wrote {} (OTA rebuilds will keep SIP support)", crate::net_dashboard::asterisk::SIP_CLIENT_MARKER);
+    }
+
+    log!(update, "--- SIP client install successful. Restarting service in 2s... ---");
+    update.lock().unwrap().finish(true);
     crate::service_control::schedule_service_action(crate::service_control::ServiceAction::Restart, std::time::Duration::from_secs(2));
 }
 
@@ -2200,10 +2441,32 @@ fn handle_connection(
     } else if req_line.contains("POST /api/dualcarrier") {
         let (inner, body_str) = read_post_body(stream);
         serve_dual_carrier_post(inner, &shared_config, &config_path, &body_str);
+    } else if req_line.contains("POST /api/asterisk/install") {
+        let mut s = stream;
+        drain_http_headers(&mut s);
+        {
+            let mut u = update_state.lock().unwrap();
+            if u.phase == UpdatePhase::Running {
+                http_response(s, 409, "Update already in progress");
+                return;
+            }
+            u.start();
+        }
+        tracing::info!("Dashboard: SIP client install triggered");
+        let update_clone = Arc::clone(&update_state);
+        let src_override = source_dir_override.clone();
+        std::thread::Builder::new()
+            .name("sip-install".into())
+            .spawn(move || run_sip_install(update_clone, src_override))
+            .ok();
+        http_response(s, 200, "OK");
     } else if req_line.contains("GET /api/asterisk/status") {
         let mut s = stream;
         drain_http_headers(&mut s);
         serve_asterisk_status(s, &shared_config);
+    } else if req_line.contains("POST /api/asterisk") {
+        let (inner, body_str) = read_post_body(stream);
+        serve_asterisk_post(inner, &shared_config, &config_path, &body_str);
     } else if req_line.contains("GET /api/snom-notify") {
         let mut s = stream;
         drain_http_headers(&mut s);
@@ -4704,27 +4967,56 @@ fn serve_tpg2200_action_url(
     http_response(stream, 200, &format!("OK incident={incident}"));
 }
 
-/// GET /api/asterisk/status — return Asterisk SIP/RTP config + runtime status.
+/// GET /api/asterisk/status — return SIP/PBX config + runtime status for the dashboard form.
 fn serve_asterisk_status(stream: TcpStream, shared_config: &Option<tetra_config::bluestation::SharedConfig>) {
+    let compiled = crate::net_dashboard::asterisk::sip_client_compiled_in();
+    let codec_installed = crate::net_dashboard::asterisk::tetra_codec_installed();
+    let ready = compiled && codec_installed;
     let body = match shared_config {
         Some(cfg) => {
-            let c = cfg.config();
+            let a = &cfg.config().asterisk;
             let runtime = cfg.state_read().asterisk_status.clone();
+            let password = a.password.as_ref();
             serde_json::json!({
+                "compiled": compiled,
+                "codec_installed": codec_installed,
+                "ready": ready,
+                "install_needed": !ready,
                 "config": {
                     "configured": true,
-                    "enabled": c.asterisk.enabled,
-                    "register": c.asterisk.register,
-                    "sip_listen": format!("{}:{}", c.asterisk.bind_addr, c.asterisk.bind_port),
-                    "remote": format!("{}:{}", c.asterisk.remote_host, c.asterisk.remote_port),
-                    "rtp_port_range": format!("{}-{}", c.asterisk.rtp_port_min, c.asterisk.rtp_port_max),
-                    "codec": c.asterisk.codec.clone(),
-                    "outbound_prefix": c.asterisk.outbound_prefix.clone(),
-                    "strip_outbound_prefix": c.asterisk.strip_outbound_prefix,
-                    "service_numbers": c.asterisk.service_numbers.clone(),
-                    "local_user": c.asterisk.local_user.clone(),
-                    "auth_user": c.asterisk.auth_user.clone(),
-                    "realm": c.asterisk.realm.clone(),
+                    "enabled": a.enabled,
+                    "register": a.register,
+                    "sip_listen": format!("{}:{}", a.bind_addr, a.bind_port),
+                    "bind_addr": a.bind_addr.clone(),
+                    "bind_port": a.bind_port,
+                    "remote": format!("{}:{}", a.remote_host, a.remote_port),
+                    "remote_host": a.remote_host.clone(),
+                    "remote_port": a.remote_port,
+                    "outbound_proxy": if a.outbound_proxy_host.trim().is_empty() {
+                        serde_json::Value::Null
+                    } else {
+                        serde_json::json!(format!("{}:{}", a.outbound_proxy_host, a.outbound_proxy_port))
+                    },
+                    "outbound_proxy_host": a.outbound_proxy_host.clone(),
+                    "outbound_proxy_port": a.outbound_proxy_port,
+                    "contact_host": a.contact_host.clone(),
+                    "from_domain": a.from_domain.clone(),
+                    "rtp_port_range": format!("{}-{}", a.rtp_port_min, a.rtp_port_max),
+                    "rtp_port_min": a.rtp_port_min,
+                    "rtp_port_max": a.rtp_port_max,
+                    "codec": a.codec.clone(),
+                    "outbound_prefix": a.outbound_prefix.clone(),
+                    "strip_outbound_prefix": a.strip_outbound_prefix,
+                    "inbound_prefix": a.inbound_prefix.clone(),
+                    "service_numbers": a.service_numbers.clone(),
+                    "local_user": a.local_user.clone(),
+                    "auth_user": a.auth_user.clone(),
+                    "realm": a.realm.clone(),
+                    "ptime_ms": a.ptime_ms,
+                    "dl_jitter_ms": a.dl_jitter_ms,
+                    "allow_from": a.allow_from.clone(),
+                    "password_masked": crate::net_dashboard::asterisk::mask_secret(password),
+                    "password_set": !password.trim().is_empty(),
                 },
                 "runtime": {
                     "configured": runtime.configured,
@@ -4732,6 +5024,11 @@ fn serve_asterisk_status(stream: TcpStream, shared_config: &Option<tetra_config:
                     "register_status": runtime.register_status,
                     "sip_listen": runtime.sip_listen,
                     "remote": runtime.remote,
+                    "outbound_proxy": if runtime.outbound_proxy.is_empty() {
+                        serde_json::Value::Null
+                    } else {
+                        serde_json::json!(runtime.outbound_proxy)
+                    },
                     "rtp_port_range": runtime.rtp_port_range,
                     "codec": runtime.codec,
                     "active_dialogs": runtime.active_dialogs,
@@ -4742,6 +5039,10 @@ fn serve_asterisk_status(stream: TcpStream, shared_config: &Option<tetra_config:
             })
         }
         None => serde_json::json!({
+            "compiled": compiled,
+            "codec_installed": codec_installed,
+            "ready": ready,
+            "install_needed": !ready,
             "config": { "configured": false, "enabled": false },
             "runtime": {
                 "configured": false,
@@ -4758,6 +5059,133 @@ fn serve_asterisk_status(stream: TcpStream, shared_config: &Option<tetra_config:
             }
         }),
     };
+    http_json_response(stream, 200, &body.to_string());
+}
+
+/// POST /api/asterisk — persist Zoiper-style SIP account settings and restart when the
+/// SIP feature is compiled in so the in-process client reconnects with the new account.
+fn serve_asterisk_post(
+    stream: TcpStream,
+    shared_config: &Option<tetra_config::bluestation::SharedConfig>,
+    config_path: &str,
+    body: &str,
+) {
+    use tetra_config::bluestation::sec_asterisk::{CfgAsteriskDto, apply_asterisk_patch};
+
+    let json: serde_json::Value = match serde_json::from_str(body.trim()) {
+        Ok(v) => v,
+        Err(e) => {
+            http_response(stream, 400, &format!("Invalid JSON: {e}"));
+            return;
+        }
+    };
+    let Some(cfg) = shared_config else {
+        http_response(stream, 503, "Config not available");
+        return;
+    };
+
+    let cur = cfg.config().asterisk.clone();
+    let dto = CfgAsteriskDto {
+        enabled: dapnet_as_bool(&json, "enabled", cur.enabled),
+        outbound_prefix: dapnet_as_string(&json, "outbound_prefix", &cur.outbound_prefix),
+        strip_outbound_prefix: dapnet_as_bool(&json, "strip_outbound_prefix", cur.strip_outbound_prefix),
+        inbound_prefix: dapnet_as_string(&json, "inbound_prefix", &cur.inbound_prefix),
+        register: dapnet_as_bool(&json, "register", cur.register),
+        codec: dapnet_as_string(&json, "codec", &cur.codec),
+        service_numbers: snom_string_list(&json, "service_numbers", &cur.service_numbers),
+        rtp_port_min: dapnet_as_u16(&json, "rtp_port_min", cur.rtp_port_min),
+        rtp_port_max: dapnet_as_u16(&json, "rtp_port_max", cur.rtp_port_max),
+        bind_addr: dapnet_as_string(&json, "bind_addr", &cur.bind_addr),
+        bind_port: dapnet_as_u16(&json, "bind_port", cur.bind_port),
+        remote_host: dapnet_as_string(&json, "remote_host", &cur.remote_host),
+        remote_port: dapnet_as_u16(&json, "remote_port", cur.remote_port),
+        outbound_proxy_host: dapnet_as_string(&json, "outbound_proxy_host", &cur.outbound_proxy_host),
+        outbound_proxy_port: dapnet_as_u16(&json, "outbound_proxy_port", cur.outbound_proxy_port),
+        contact_host: dapnet_as_string(&json, "contact_host", &cur.contact_host),
+        from_domain: dapnet_as_string(&json, "from_domain", &cur.from_domain),
+        local_user: dapnet_as_string(&json, "local_user", &cur.local_user),
+        auth_user: dapnet_as_string(&json, "auth_user", &cur.auth_user),
+        password: dapnet_resolve_secret(&json, "password", cur.password.as_ref()),
+        realm: dapnet_as_string(&json, "realm", &cur.realm),
+        options_interval_secs: dapnet_as_u64(&json, "options_interval_secs", cur.options_interval_secs),
+        ptime_ms: dapnet_as_u16(&json, "ptime_ms", cur.ptime_ms),
+        dl_jitter_ms: dapnet_as_u16(&json, "dl_jitter_ms", cur.dl_jitter_ms),
+        allow_from: snom_string_list(&json, "allow_from", &cur.allow_from),
+        max_pending_dialogs: json
+            .get("max_pending_dialogs")
+            .and_then(|x| x.as_u64())
+            .map(|n| n as usize)
+            .unwrap_or(cur.max_pending_dialogs),
+        max_invites_per_minute: json
+            .get("max_invites_per_minute")
+            .and_then(|x| x.as_u64())
+            .map(|n| n as u32)
+            .unwrap_or(cur.max_invites_per_minute),
+        extra: Default::default(),
+    };
+
+    let patched = match apply_asterisk_patch(dto) {
+        Ok(c) => c,
+        Err(e) => {
+            http_response(stream, 400, &format!("Invalid SIP setting: {e}"));
+            return;
+        }
+    };
+
+    let text_fields = [
+        patched.remote_host.as_str(),
+        patched.outbound_proxy_host.as_str(),
+        patched.contact_host.as_str(),
+        patched.from_domain.as_str(),
+        patched.local_user.as_str(),
+        patched.auth_user.as_str(),
+        patched.password.as_ref(),
+        patched.realm.as_str(),
+        patched.bind_addr.as_str(),
+    ];
+    if !text_fields.iter().all(|v| dapnet_text_acceptable(v)) {
+        http_response(stream, 400, "Invalid SIP setting: control characters are not allowed");
+        return;
+    }
+
+    if let Err(e) = crate::net_dashboard::asterisk::write_asterisk_to_toml(config_path, &patched) {
+        tracing::warn!("Dashboard: SIP client failed to persist to TOML: {}", e);
+        http_response(stream, 500, &format!("Failed to write config file: {e}"));
+        return;
+    }
+
+    let compiled = crate::net_dashboard::asterisk::sip_client_compiled_in();
+    let restart = compiled;
+    if restart {
+        tracing::info!(
+            "Dashboard: SIP client saved (enabled={} user={} host={}); scheduling restart",
+            patched.enabled,
+            patched.local_user,
+            patched.remote_host
+        );
+        crate::service_control::schedule_service_action(
+            crate::service_control::ServiceAction::Restart,
+            std::time::Duration::from_secs(2),
+        );
+    } else {
+        tracing::info!(
+            "Dashboard: SIP client saved (enabled={} user={} host={}); install required before it can run",
+            patched.enabled,
+            patched.local_user,
+            patched.remote_host
+        );
+    }
+
+    let body = serde_json::json!({
+        "ok": true,
+        "compiled": compiled,
+        "restart": restart,
+        "message": if restart {
+            "Saved. Restarting to apply SIP account."
+        } else {
+            "Saved. Click Install SIP Client to compile the bridge, then enable it."
+        },
+    });
     http_json_response(stream, 200, &body.to_string());
 }
 

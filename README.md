@@ -282,22 +282,44 @@ If you run FlowStation behind a firewall, open the ports that match your config:
 | Asterisk SIP | UDP/TCP 5060 | outbound/inbound to PBX |
 | DAPNET RWTH core | TCP 43434 | outbound |
 
-### Asterisk SIP/RTP bridge
+### SIP client / PBX bridge (Asterisk, FreeSWITCH, 3CX, …)
 
-FlowStation can register as a PJSIP endpoint and bridge calls between TETRA
-terminals and Asterisk phones. Brew remains available in parallel; only configured
-service numbers are routed to Asterisk.
+FlowStation includes a built-in SIP client (like Zoiper) that registers as an
+extension on any SIP PBX and bridges individual (P2P) voice calls between TETRA
+radios and the PBX. Brew remains available in parallel; only configured service
+numbers are routed to the PBX.
 
 This bridge requires a build with `--features asterisk` and the native
 `tetra-codec` library (see the note at the top of this section); it is not part of
 the default build.
+
+**From the dashboard (plug-and-play):** open **SIP Client**, fill the Zoiper-style
+account (server, optional outbound proxy, extension, password), click **Install**,
+wait until the log finishes, then **Save**. Install compiles `tetra-codec`, rebuilds
+FlowStation with SIP support, and restarts the service. It does **not** install a
+local Asterisk — the radios become an extension of the PBX you already run
+(Asterisk, FreeSWITCH, 3CX, …). Later OTA updates keep `--features asterisk` so SIP
+is not dropped on the next upgrade.
+
+**Zoiper-style account mapping** (config section name stays `[asterisk]` for
+compatibility):
+
+| Zoiper field | FlowStation config |
+|---|---|
+| Username / extension | `local_user` |
+| Password | `password` |
+| Domain | `from_domain` |
+| SIP server | `remote_host` + `remote_port` |
+| Outbound proxy (optional) | `outbound_proxy_host` + `outbound_proxy_port` |
+| Auth username | `auth_user` |
+| Auth realm | `realm` |
 
 ```toml
 [asterisk]
 enabled = true
 outbound_prefix = "91"          # TETRA -> SIP: 91385 calls SIP user 385
 strip_outbound_prefix = true
-inbound_prefix = "T"            # SIP -> TETRA: Dial PJSIP/T2632585@flowstation
+inbound_prefix = "T"            # SIP -> TETRA: dial T2632585@flowstation
 register = true
 codec = "PCMU"                  # currently the only supported SIP codec
 service_numbers = ["385", "600", "601"]
@@ -305,14 +327,16 @@ rtp_port_min = 30000
 rtp_port_max = 30100
 bind_addr = "0.0.0.0"
 bind_port = 5062
-remote_host = "127.0.0.1"
+remote_host = "pbx.example.com" # SIP server (IP or hostname)
 remote_port = 5060
-contact_host = "127.0.0.1"
-from_domain = "127.0.0.1"
-local_user = "flowstation"
-auth_user = "flowstation"
+outbound_proxy_host = ""        # optional; set to proxy IP/hostname or leave empty
+outbound_proxy_port = 5060
+contact_host = "192.168.1.50"   # public IP/hostname the PBX uses to reach the Pi
+from_domain = "pbx.example.com"
+local_user = "1001"
+auth_user = "1001"
 password = "change-me"
-realm = "asterisk"
+realm = "pbx.example.com"
 ```
 
 Minimal Asterisk dialplan shape:
@@ -354,6 +378,27 @@ max_contacts=1
 remove_existing=yes
 qualify_frequency=30
 ```
+
+Minimal FreeSWITCH user shape (register FlowStation as extension `1001`):
+
+```xml
+<!-- conf/directory/default/1001.xml -->
+<include>
+  <user id="1001">
+    <params>
+      <param name="password" value="change-me"/>
+      <param name="vm-password" value="1001"/>
+    </params>
+    <variables>
+      <variable name="user_context" value="default"/>
+    </variables>
+  </user>
+</include>
+```
+
+Dialplan to reach TETRA from FreeSWITCH: bridge to `user/1001@$${domain}` for
+outbound from FlowStation, and route inbound to TETRA via the `inbound_prefix`
+(e.g. `T2632585` → ISSI 2632585).
 
 `service_numbers` is deliberately an allowlist. If a TETRA user dials `91385`,
 FlowStation strips `91`, checks that `385` is listed, then calls SIP user `385`.

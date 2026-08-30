@@ -431,6 +431,8 @@ bind_addr = "0.0.0.0"
 bind_port = 5062
 remote_host = "127.0.0.1"
 remote_port = 5060
+outbound_proxy_host = ""
+outbound_proxy_port = 5060
 contact_host = "127.0.0.1"
 from_domain = "127.0.0.1"
 local_user = "flowstation"
@@ -538,6 +540,8 @@ sds_queue_critical = 128
         assert_eq!(cfg.health.core_stall_secs, 10);
         assert!(cfg.asterisk.enabled);
         assert_eq!(cfg.asterisk.service_numbers, vec!["600".to_string(), "601".to_string()]);
+        assert!(cfg.asterisk.outbound_proxy_host.is_empty());
+        assert_eq!(cfg.asterisk.outbound_proxy_port, 5060);
         assert!(cfg.dapnet.enabled);
         assert!(cfg.dapnet.rwth_core_enabled);
         assert_eq!(cfg.dapnet.callout_incident_base, 2);

@@ -1,3 +1,4 @@
+pub mod asterisk;
 pub mod callsign;
 pub mod dapnet;
 pub mod dual_carrier;
