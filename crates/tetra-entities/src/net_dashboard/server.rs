@@ -812,6 +812,219 @@ fn run_update(update: SharedUpdateState, config_path: String, source_dir_overrid
     crate::service_control::schedule_service_action(crate::service_control::ServiceAction::Restart, std::time::Duration::from_secs(2));
 }
 
+/// KiB values from `/proc/meminfo`. Missing keys are treated as 0.
+fn meminfo_kib(keys: &[&str]) -> Vec<u64> {
+    let Ok(text) = std::fs::read_to_string("/proc/meminfo") else {
+        return keys.iter().map(|_| 0).collect();
+    };
+    keys.iter()
+        .map(|want| {
+            text.lines()
+                .find_map(|line| {
+                    let (k, rest) = line.split_once(':')?;
+                    (k == *want).then(|| rest.split_whitespace().next()?.parse::<u64>().ok())?
+                })
+                .unwrap_or(0)
+        })
+        .collect()
+}
+
+fn host_is_low_ram() -> bool {
+    // Pi 3B+ reports ~948000–970000 KiB; treat anything under 1.5 GiB as low-RAM.
+    let mem_total = meminfo_kib(&["MemTotal"]).first().copied().unwrap_or(0);
+    mem_total > 0 && mem_total < 1_500_000
+}
+
+/// Ensure enough swap for compiling Rust on a 1 GiB Pi. Without this, `cargo` stalls forever
+/// (or is OOM-killed) while compiling large crates like `tetra-entities` / `soapysdr-sys`.
+fn ensure_build_swap(update: &SharedUpdateState) {
+    macro_rules! log {
+        ($update:expr, $($arg:tt)*) => {{
+            let line = format!($($arg)*);
+            tracing::info!("UPDATE: {}", line);
+            $update.lock().unwrap().append(&line);
+        }};
+    }
+
+    let vals = meminfo_kib(&["MemTotal", "MemAvailable", "SwapTotal", "SwapFree"]);
+    let mem_total = vals.first().copied().unwrap_or(0);
+    let mem_avail = vals.get(1).copied().unwrap_or(0);
+    let swap_total = vals.get(2).copied().unwrap_or(0);
+    let swap_free = vals.get(3).copied().unwrap_or(0);
+    log!(
+        update,
+        "Memory: MemTotal={} MiB, MemAvailable={} MiB, SwapTotal={} MiB, SwapFree={} MiB",
+        mem_total / 1024,
+        mem_avail / 1024,
+        swap_total / 1024,
+        swap_free / 1024
+    );
+
+    // Need ~2 GiB of swap on <=1.5 GiB RAM hosts. Existing swap is reused as-is.
+    const TARGET_SWAP_KIB: u64 = 2 * 1024 * 1024;
+    if mem_total == 0 || mem_total >= 1_500_000 {
+        log!(update, "Host has enough RAM for a normal cargo build; skipping swap setup.");
+        return;
+    }
+    if swap_total >= TARGET_SWAP_KIB {
+        log!(update, "Swap already >= 2 GiB; good for Pi 3B+ builds.");
+        return;
+    }
+
+    let swap_path = std::path::Path::new("/var/tmp/flowstation-build.swap");
+    let swap_str = swap_path.to_str().unwrap_or("/var/tmp/flowstation-build.swap");
+
+    // Reuse a previous Install's swapfile when present.
+    if swap_path.is_file() {
+        log!(update, "Found existing {}, trying swapon…", swap_path.display());
+        if run_maybe_sudo(update, "swapon", &[swap_str], std::path::Path::new("/")).is_some()
+            || std::fs::read_to_string("/proc/swaps").unwrap_or_default().contains("flowstation-build.swap")
+        {
+            {
+                let mut u = update.lock().unwrap();
+                if matches!(u.phase, UpdatePhase::Done { success: false }) {
+                    u.phase = UpdatePhase::Running;
+                }
+            }
+            log!(update, "✓ build swap is active.");
+            if is_root() {
+                let _ = std::fs::write("/proc/sys/vm/swappiness", "80");
+            }
+            return;
+        }
+        {
+            let mut u = update.lock().unwrap();
+            if matches!(u.phase, UpdatePhase::Done { success: false }) {
+                u.phase = UpdatePhase::Running;
+            }
+        }
+        log!(update, "Existing swapfile could not be activated; recreating.");
+        let _ = run_maybe_sudo(update, "rm", &["-f", swap_str], std::path::Path::new("/"));
+        {
+            let mut u = update.lock().unwrap();
+            if matches!(u.phase, UpdatePhase::Done { success: false }) {
+                u.phase = UpdatePhase::Running;
+            }
+        }
+    }
+
+    log!(
+        update,
+        "--- Low-RAM host: creating 2 GiB swap at {} (compile would OOM without it) ---",
+        swap_path.display()
+    );
+
+    // Prefer fallocate; fall back to dd. Both need root on most installs.
+    let size_mb = "2048";
+    let created = if command_exists("fallocate") {
+        run_maybe_sudo(
+            update,
+            "fallocate",
+            &["-l", &format!("{size_mb}M"), swap_path.to_str().unwrap_or("/var/tmp/flowstation-build.swap")],
+            std::path::Path::new("/"),
+        )
+        .is_some()
+    } else {
+        false
+    };
+    if !created {
+        {
+            let mut u = update.lock().unwrap();
+            if matches!(u.phase, UpdatePhase::Done { success: false }) {
+                u.phase = UpdatePhase::Running;
+            }
+        }
+        let dd_ok = run_maybe_sudo(
+            update,
+            "dd",
+            &[
+                "if=/dev/zero",
+                &format!("of={}", swap_path.display()),
+                "bs=1M",
+                &format!("count={size_mb}"),
+                "status=progress",
+            ],
+            std::path::Path::new("/"),
+        )
+        .is_some();
+        if !dd_ok {
+            log!(update, "WARNING: could not create swap file; build may still OOM on 1 GiB RAM.");
+            {
+                let mut u = update.lock().unwrap();
+                if matches!(u.phase, UpdatePhase::Done { success: false }) {
+                    u.phase = UpdatePhase::Running;
+                }
+            }
+            return;
+        }
+    }
+
+    let _ = run_maybe_sudo(update, "chmod", &["600", swap_path.to_str().unwrap_or("/var/tmp/flowstation-build.swap")], std::path::Path::new("/"));
+    {
+        let mut u = update.lock().unwrap();
+        if matches!(u.phase, UpdatePhase::Done { success: false }) {
+            u.phase = UpdatePhase::Running;
+        }
+    }
+    if run_maybe_sudo(update, "mkswap", &[swap_path.to_str().unwrap_or("/var/tmp/flowstation-build.swap")], std::path::Path::new("/")).is_none() {
+        log!(update, "WARNING: mkswap failed; continuing without extra swap.");
+        {
+            let mut u = update.lock().unwrap();
+            if matches!(u.phase, UpdatePhase::Done { success: false }) {
+                u.phase = UpdatePhase::Running;
+            }
+        }
+        return;
+    }
+    {
+        let mut u = update.lock().unwrap();
+        if matches!(u.phase, UpdatePhase::Done { success: false }) {
+            u.phase = UpdatePhase::Running;
+        }
+    }
+    if run_maybe_sudo(update, "swapon", &[swap_path.to_str().unwrap_or("/var/tmp/flowstation-build.swap")], std::path::Path::new("/")).is_none() {
+        log!(update, "WARNING: swapon failed (file may already be active); continuing.");
+        {
+            let mut u = update.lock().unwrap();
+            if matches!(u.phase, UpdatePhase::Done { success: false }) {
+                u.phase = UpdatePhase::Running;
+            }
+        }
+    } else {
+        log!(update, "✓ 2 GiB build swap is active.");
+    }
+
+    // Best-effort: reclaim page cache so rustc has a cleaner shot at MemAvailable.
+    if is_root() {
+        let _ = std::fs::write("/proc/sys/vm/drop_caches", "3");
+        let _ = std::fs::write("/proc/sys/vm/swappiness", "80");
+    }
+}
+
+/// Apply Pi-friendly cargo/rustc env so a 1 GiB host does not thrash while compiling
+/// `tetra-entities` / LLVM. Serial jobs + more codegen units = lower peak RAM.
+fn apply_low_ram_cargo_env(cmd: &mut std::process::Command, update: &SharedUpdateState, low_ram: bool) {
+    if !low_ram {
+        return;
+    }
+    macro_rules! log {
+        ($update:expr, $($arg:tt)*) => {{
+            let line = format!($($arg)*);
+            tracing::info!("UPDATE: {}", line);
+            $update.lock().unwrap().append(&line);
+        }};
+    }
+    log!(update, "Low-RAM cargo settings: -j1, incremental=off, codegen-units=16, lto=off");
+    cmd.env("CARGO_BUILD_JOBS", "1");
+    cmd.env("CARGO_INCREMENTAL", "0");
+    cmd.env("CARGO_PROFILE_RELEASE_CODEGEN_UNITS", "16");
+    cmd.env("CARGO_PROFILE_RELEASE_LTO", "false");
+    cmd.env("CARGO_PROFILE_RELEASE_DEBUG", "0");
+    // Make any nested make/cc (bindgen/cmake) also single-job.
+    cmd.env("MAKEFLAGS", "-j1");
+    cmd.env("CMAKE_BUILD_PARALLEL_LEVEL", "1");
+}
+
 /// `cargo build --release`, optionally with `--features asterisk`. Resolves cargo the same way
 /// as OTA (FH-BUG-037) and streams output into the shared update log.
 fn run_cargo_release_build(update: &SharedUpdateState, src_dir: &std::path::Path, with_asterisk: bool) -> bool {
@@ -823,18 +1036,76 @@ fn run_cargo_release_build(update: &SharedUpdateState, src_dir: &std::path::Path
         }};
     }
 
+    let low_ram = host_is_low_ram();
+    if low_ram || with_asterisk {
+        ensure_build_swap(update);
+    }
+
     let cargo = find_cargo();
     log!(update, "Using cargo: {}", cargo.display());
+
+    // On low-RAM hosts, compile the hungriest workspace crate alone first (pulls soapysdr-sys /
+    // tetra-entities LLVM work in isolation), then the final binary. A parallel compile of those
+    // crates is what OOMs a Pi 3B+.
+    if low_ram {
+        log!(update, "--- Staged compile: tetra-entities alone first (low-RAM) ---");
+        let mut pre_args: Vec<String> = vec![
+            "build".into(),
+            "--release".into(),
+            "-p".into(),
+            "tetra-entities".into(),
+            "-j".into(),
+            "1".into(),
+        ];
+        if with_asterisk {
+            pre_args.push("--features".into());
+            pre_args.push("asterisk".into());
+        }
+        let mut pre = std::process::Command::new(&cargo);
+        pre.args(&pre_args).current_dir(src_dir);
+        apply_low_ram_cargo_env(&mut pre, update, true);
+        if let Ok(pkg) = std::env::var("PKG_CONFIG_PATH") {
+            pre.env("PKG_CONFIG_PATH", pkg);
+        } else {
+            pre.env("PKG_CONFIG_PATH", "/usr/local/lib/pkgconfig:/usr/lib/pkgconfig");
+        }
+        if cargo.is_absolute() {
+            if let Some(bin) = cargo.parent().filter(|p| !p.as_os_str().is_empty()) {
+                let new_path = match std::env::var("PATH") {
+                    Ok(p) if !p.is_empty() => format!("{}:{}", bin.display(), p),
+                    _ => bin.display().to_string(),
+                };
+                pre.env("PATH", new_path);
+            }
+        }
+        let pre_label = format!("$ cargo {}", pre_args.join(" "));
+        if stream_cmd(update, pre, pre_label).is_none() {
+            return false;
+        }
+        log!(update, "✓ tetra-entities stage done; building bluestation-bs next.");
+    }
+
     let mut args: Vec<String> = vec!["build".into(), "--release".into()];
+    if low_ram {
+        args.push("-j".into());
+        args.push("1".into());
+        // Prefer the binary package so we do not re-drive the whole workspace unnecessarily.
+        args.push("-p".into());
+        args.push("bluestation-bs".into());
+    }
     if with_asterisk {
         args.push("--features".into());
         args.push("asterisk".into());
-        log!(update, "--- cargo build --release --features asterisk ---");
+        log!(update, "--- cargo build --release --features asterisk{} ---", if low_ram { " -j1" } else { "" });
+        if low_ram {
+            log!(update, "Pi 3B+ / 1 GiB: this often takes 45–120 minutes. Long pauses on Compiling tetra-entities are LLVM using swap — wait it out.");
+        }
     } else {
-        log!(update, "--- cargo build --release ---");
+        log!(update, "--- cargo build --release{} ---", if low_ram { " -j1" } else { "" });
     }
     let mut build = std::process::Command::new(&cargo);
     build.args(&args).current_dir(src_dir);
+    apply_low_ram_cargo_env(&mut build, update, low_ram);
     if let Ok(pkg) = std::env::var("PKG_CONFIG_PATH") {
         build.env("PKG_CONFIG_PATH", pkg);
     } else {
@@ -918,7 +1189,12 @@ fn run_sip_install(update: SharedUpdateState, source_dir_override: Option<String
 
     log!(update, "=== FlowStation SIP Client install ===");
     log!(update, "This compiles tetra-codec and rebuilds FlowStation with --features asterisk.");
-    log!(update, "On a Raspberry Pi 3B+ this can take 15–40 minutes. Do not power off.");
+    if host_is_low_ram() {
+        log!(update, "Detected <=1.5 GiB RAM (Pi 3B+ class): will enable 2 GiB swap and cargo -j1.");
+        log!(update, "Expect 45–120 minutes. Do not power off — pauses on Compiling tetra-entities are normal.");
+    } else {
+        log!(update, "On a Raspberry Pi 3B+ this can take 15–40 minutes. Do not power off.");
+    }
 
     let src_dir = match resolve_source_dir(source_dir_override.as_deref()) {
         Ok(p) => p,
@@ -1033,8 +1309,9 @@ fn run_sip_install(update: SharedUpdateState, source_dir_override: Option<String
     {
         return;
     }
-    // Pi 3B+ is RAM-limited; two compile jobs is enough without swapping the box to death.
-    if run_cmd(&update, "cmake", &["--build", "build", "--parallel", "2"], &codec_dir).is_none() {
+    // Pi 3B+ is RAM-limited; keep cmake single-job when swap is scarce.
+    let cmake_jobs = if host_is_low_ram() { "1" } else { "2" };
+    if run_cmd(&update, "cmake", &["--build", "build", "--parallel", cmake_jobs], &codec_dir).is_none() {
         return;
     }
     if run_maybe_sudo(&update, "cmake", &["--install", "build"], &codec_dir).is_none() {
