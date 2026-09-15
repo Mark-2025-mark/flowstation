@@ -15,6 +15,9 @@ pub struct CfgAsterisk {
     pub register: bool,
     pub codec: String,
     pub service_numbers: Vec<String>,
+    /// Short TETRA codes (after outbound prefix strip) mapped to full SIP/PSTN numbers.
+    /// Example: dial 91601 on radio → SIP INVITE to 612345678.
+    pub speed_dials: HashMap<String, String>,
     pub rtp_port_min: u16,
     pub rtp_port_max: u16,
     pub bind_addr: String,
@@ -68,6 +71,8 @@ pub struct CfgAsteriskDto {
     pub codec: String,
     #[serde(default)]
     pub service_numbers: Vec<String>,
+    #[serde(default)]
+    pub speed_dials: HashMap<String, String>,
     #[serde(default = "default_rtp_port_min")]
     pub rtp_port_min: u16,
     #[serde(default = "default_rtp_port_max")]
@@ -123,6 +128,7 @@ impl Default for CfgAsteriskDto {
             register: default_register(),
             codec: default_codec(),
             service_numbers: Vec::new(),
+            speed_dials: HashMap::new(),
             rtp_port_min: default_rtp_port_min(),
             rtp_port_max: default_rtp_port_max(),
             bind_addr: default_bind_addr(),
@@ -305,6 +311,22 @@ pub fn apply_asterisk_patch(src: CfgAsteriskDto) -> Result<CfgAsterisk, String> 
         .filter(|n| !n.is_empty())
         .collect();
 
+    let mut speed_dials = HashMap::new();
+    for (k, v) in src.speed_dials {
+        let key = k.trim().to_string();
+        let val = v.trim().to_string();
+        if key.is_empty() || val.is_empty() {
+            continue;
+        }
+        if !key.chars().all(|c| c.is_ascii_digit()) || !val.chars().all(|c| c.is_ascii_digit()) {
+            return Err(format!(
+                "asterisk: speed_dials keys/values must be digits only (got '{}' -> '{}')",
+                key, val
+            ));
+        }
+        speed_dials.insert(key, val);
+    }
+
     Ok(CfgAsterisk {
         enabled: src.enabled,
         outbound_prefix: src.outbound_prefix,
@@ -313,6 +335,7 @@ pub fn apply_asterisk_patch(src: CfgAsteriskDto) -> Result<CfgAsterisk, String> 
         register: src.register,
         codec,
         service_numbers,
+        speed_dials,
         rtp_port_min: src.rtp_port_min,
         rtp_port_max: src.rtp_port_max,
         bind_addr: src.bind_addr,
@@ -365,6 +388,29 @@ mod tests {
         let cfg = apply_asterisk_patch(dto).unwrap();
         assert_eq!(cfg.outbound_proxy_host, "10.0.0.1");
         assert_eq!(cfg.outbound_proxy_port, 5080);
+    }
+
+    #[test]
+    fn speed_dials_digits_only() {
+        let mut dto = CfgAsteriskDto::default();
+        dto.speed_dials.insert("601".into(), "612345678".into());
+        let cfg = apply_asterisk_patch(dto).unwrap();
+        assert_eq!(cfg.speed_dials.get("601").map(String::as_str), Some("612345678"));
+
+        let mut bad = CfgAsteriskDto::default();
+        bad.speed_dials.insert("abc".into(), "612345678".into());
+        assert!(apply_asterisk_patch(bad).unwrap_err().contains("speed_dials"));
+    }
+
+    #[test]
+    fn contact_host_cannot_equal_pbx_when_enabled() {
+        let mut dto = CfgAsteriskDto::default();
+        dto.enabled = true;
+        dto.remote_host = "ice.vozpbx.com".into();
+        dto.from_domain = "ice.vozpbx.com".into();
+        dto.contact_host = "ice.vozpbx.com".into();
+        let err = apply_asterisk_patch(dto).unwrap_err();
+        assert!(err.contains("contact_host"));
     }
 }
 

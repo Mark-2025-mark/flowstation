@@ -2737,6 +2737,10 @@ fn handle_connection(
             .spawn(move || run_sip_install(update_clone, src_override))
             .ok();
         http_response(s, 200, "OK");
+    } else if req_line.contains("GET /api/asterisk/public-ip") {
+        let mut s = stream;
+        drain_http_headers(&mut s);
+        serve_asterisk_public_ip(s);
     } else if req_line.contains("GET /api/asterisk/status") {
         let mut s = stream;
         drain_http_headers(&mut s);
@@ -5244,6 +5248,84 @@ fn serve_tpg2200_action_url(
     http_response(stream, 200, &format!("OK incident={incident}"));
 }
 
+
+fn parse_asterisk_speed_dials(
+    json: &serde_json::Value,
+    fallback: &std::collections::HashMap<String, String>,
+) -> std::collections::HashMap<String, String> {
+    let mut out = std::collections::HashMap::new();
+    if let Some(arr) = json.get("speed_dials").and_then(|v| v.as_array()) {
+        for item in arr {
+            let Some(s) = item.as_str() else { continue };
+            let Some((k, v)) = s.split_once('=') else { continue };
+            let k = k.trim();
+            let v = v.trim();
+            if !k.is_empty() && !v.is_empty() {
+                out.insert(k.to_string(), v.to_string());
+            }
+        }
+        return out;
+    }
+    if let Some(obj) = json.get("speed_dials").and_then(|v| v.as_object()) {
+        for (k, v) in obj {
+            if let Some(val) = v.as_str() {
+                let k = k.trim();
+                let val = val.trim();
+                if !k.is_empty() && !val.is_empty() {
+                    out.insert(k.to_string(), val.to_string());
+                }
+            }
+        }
+        return out;
+    }
+    fallback.clone()
+}
+
+/// GET /api/asterisk/public-ip — detect this host's public IPv4 for Contact.
+fn serve_asterisk_public_ip(stream: TcpStream) {
+    let urls = [
+        "https://api.ipify.org",
+        "https://ifconfig.me/ip",
+        "https://icanhazip.com",
+    ];
+    let client = match reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(4))
+        .user_agent("FlowStation-SIP/1.0")
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            http_json_response(
+                stream,
+                500,
+                &serde_json::json!({"ok": false, "error": format!("http client: {e}")}).to_string(),
+            );
+            return;
+        }
+    };
+    for url in urls {
+        match client.get(url).send().and_then(|r| r.error_for_status()).and_then(|r| r.text()) {
+            Ok(body) => {
+                let ip = body.trim().trim_matches('"').to_string();
+                if ip.parse::<std::net::Ipv4Addr>().is_ok() {
+                    http_json_response(
+                        stream,
+                        200,
+                        &serde_json::json!({"ok": true, "public_ip": ip, "source": url}).to_string(),
+                    );
+                    return;
+                }
+            }
+            Err(e) => tracing::debug!("public-ip probe {} failed: {}", url, e),
+        }
+    }
+    http_json_response(
+        stream,
+        502,
+        &serde_json::json!({"ok": false, "error": "could not detect public IPv4"}).to_string(),
+    );
+}
+
 /// GET /api/asterisk/status — return SIP/PBX config + runtime status for the dashboard form.
 fn serve_asterisk_status(stream: TcpStream, shared_config: &Option<tetra_config::bluestation::SharedConfig>) {
     let compiled = crate::net_dashboard::asterisk::sip_client_compiled_in();
@@ -5286,6 +5368,11 @@ fn serve_asterisk_status(stream: TcpStream, shared_config: &Option<tetra_config:
                     "strip_outbound_prefix": a.strip_outbound_prefix,
                     "inbound_prefix": a.inbound_prefix.clone(),
                     "service_numbers": a.service_numbers.clone(),
+                    "speed_dials": a
+                        .speed_dials
+                        .iter()
+                        .map(|(k, v)| format!("{k}={v}"))
+                        .collect::<Vec<_>>(),
                     "local_user": a.local_user.clone(),
                     "auth_user": a.auth_user.clone(),
                     "realm": a.realm.clone(),
@@ -5370,6 +5457,7 @@ fn serve_asterisk_post(
         register: dapnet_as_bool(&json, "register", cur.register),
         codec: dapnet_as_string(&json, "codec", &cur.codec),
         service_numbers: snom_string_list(&json, "service_numbers", &cur.service_numbers),
+        speed_dials: parse_asterisk_speed_dials(&json, &cur.speed_dials),
         rtp_port_min: dapnet_as_u16(&json, "rtp_port_min", cur.rtp_port_min),
         rtp_port_max: dapnet_as_u16(&json, "rtp_port_max", cur.rtp_port_max),
         bind_addr: dapnet_as_string(&json, "bind_addr", &cur.bind_addr),

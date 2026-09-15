@@ -3164,7 +3164,11 @@ tbody tr:hover td{background:color-mix(in srgb,var(--bg3) 70%, transparent);}
             <label class="h-flabel" data-i18n="ast_outbound_proxy_port">Proxy port</label>
             <input type="number" id="ast-proxy-port" class="form-input" min="1" max="65535" placeholder="5060">
             <label class="h-flabel" data-i18n="ast_contact_host">Contact / public IP of this Pi</label>
-            <input type="text" id="ast-contact-host" class="form-input" placeholder="YOUR.PI.PUBLIC.IP">
+            <div style="display:flex;gap:8px;align-items:center">
+              <input type="text" id="ast-contact-host" class="form-input" placeholder="YOUR.PI.PUBLIC.IP" style="flex:1">
+              <button type="button" class="btn btn-sm" id="ast-detect-ip-btn" onclick="detectAsteriskPublicIp()"><span data-i18n="ast_detect_ip">Detect IP</span></button>
+            </div>
+            <p class="sds-empty" style="margin:4px 0 8px" data-i18n="ast_contact_help">Must be this Pi's public IP (not the PBX). Detect fills it automatically.</p>
             <label class="h-flabel" data-i18n="ast_bind_addr">Listen address</label>
             <input type="text" id="ast-bind-addr" class="form-input" placeholder="0.0.0.0">
             <label class="h-flabel" data-i18n="ast_bind_port">Listen port</label>
@@ -3179,6 +3183,9 @@ tbody tr:hover td{background:color-mix(in srgb,var(--bg3) 70%, transparent);}
             <input type="number" id="ast-rtp-max" class="form-input" min="1" max="65535" placeholder="30100">
             <label class="h-flabel top" data-i18n="ast_service_numbers">Allowed SIP numbers</label>
             <textarea id="ast-service-numbers" class="form-input" rows="3" placeholder="600&#10;385"></textarea>
+            <label class="h-flabel top" data-i18n="ast_speed_dials">Speed dials (short=full number)</label>
+            <textarea id="ast-speed-dials" class="form-input" rows="3" placeholder="601=612345678&#10;100=912345678"></textarea>
+            <p class="sds-empty" style="margin:4px 0 8px" data-i18n="ast_speed_dials_help">TETRA SSI is 24-bit (max 16777215 / ~8 digits). For 9-digit Spanish numbers dial e.g. 91601 → maps to 612345678.</p>
           </div>
           <p class="sds-empty" style="margin-top:10px" data-i18n="ast_save_help">Save writes config.toml. If the SIP client is already installed, FlowStation restarts to register with the PBX. Group calls, Brew, SDS and the rest of the stack are unchanged.</p>
         </div>
@@ -4340,7 +4347,7 @@ const LANGS={
     ast_local_user:'Extension / username',ast_auth_user:'Auth username',ast_password:'Password',
     ast_domain:'SIP domain',ast_realm:'Auth realm',ast_remote_host:'SIP server',ast_remote_port:'SIP port',
     ast_outbound_proxy_host:'Outbound proxy (optional)',ast_outbound_proxy_port:'Proxy port',
-    ast_contact_host:'Contact = public IP of THIS Pi (not the PBX)',ast_bind_addr:'Listen address',ast_bind_port:'Listen port',
+    ast_contact_host:'Contact = public IP of THIS Pi (not the PBX)',ast_detect_ip:'Detect IP',ast_contact_help:'Must be this Pi public IP, not the PBX. Detect fills it automatically.',ast_speed_dials:'Speed dials (short=full)',ast_speed_dials_help:'TETRA SSI max ~8 digits (24-bit). For 9-digit mobiles use short codes: dial 91601 → SIP 612345678.',ast_detect_ip_ok:'Public IP detected',ast_detect_ip_fail:'Could not detect public IP',ast_bind_addr:'Listen address',ast_bind_port:'Listen port',
     ast_out_prefix:'Outbound prefix (TETRA → SIP)',ast_in_prefix:'Inbound prefix (SIP → TETRA)',
     ast_rtp_min:'RTP port min',ast_rtp_max:'RTP port max',ast_service_numbers:'Allowed SIP numbers',
     ast_save_help:'Save writes config.toml. If the SIP client is already installed, FlowStation restarts to register with the PBX. Group calls, Brew, SDS and the rest of the stack are unchanged.',
@@ -4659,6 +4666,10 @@ const LANGS={
     asterisk:'Cliente SIP',asterisk_title:'Cliente SIP (PBX)',ast_install:'Instalar',ast_install_title:'Instalar cliente SIP',
     ast_account:'Cuenta SIP (estilo Zoiper)',ast_enable:'Activar cliente SIP (registrarse como extensión PBX)',
     ast_install_confirm:'¿Instalar el cliente SIP ahora?\n\nCompila tetra-codec y reconstruye FlowStation con soporte SIP (15–40 min en una Pi 3B+). La estación se reinicia al terminar. Las llamadas de grupo, Brew y SDS se conservan.',
+    ast_contact_host:'Contact = IP pública de ESTA Pi (no la PBX)',ast_detect_ip:'Detectar IP',ast_contact_help:'Debe ser la IP pública de esta Pi, no la PBX. Detectar la rellena sola.',
+    ast_speed_dials:'Marcaciones rápidas (corto=número completo)',
+    ast_speed_dials_help:'El SSI TETRA es de 24 bits (máx 16777215 / ~8 dígitos). Para móviles de 9 cifras usa códigos cortos: marca 91601 → SIP 612345678.',
+    ast_detect_ip_ok:'IP pública detectada',ast_detect_ip_fail:'No se pudo detectar la IP pública',
     ast_saved_restart:'✓ Guardado — reiniciando para aplicar',ast_need_install:'Guardado. Pulsa Instalar para compilar el puente SIP.',
     whitelist_enforced:'ACTIVA',whitelist_open:'ABIERTA',whitelist_invalid:'Introduce un ISSI válido (1–16777215).',
     wx_title:'Servicio WX / METAR',wx_help:'Servicio meteorológico integrado. Las radios envían un SDS como "METAR LROP" al ISSI del servicio y reciben un informe decodificado. Opcionalmente envía automáticamente el METAR de una estación fija a un ISSI o grupo a intervalos. Datos de aviationweather.gov.',
@@ -6736,6 +6747,10 @@ async function loadAsteriskStatus(){
     fill('ast-rtp-min',c.rtp_port_min||30000);
     fill('ast-rtp-max',c.rtp_port_max||30100);
     fill('ast-service-numbers',(c.service_numbers||[]).join('\n'));
+    fill('ast-speed-dials',(c.speed_dials||[]).join('\n'));
+    // Auto-fill Contact with public IP when unset or still the loopback default.
+    const ch=(c.contact_host||'').trim().toLowerCase();
+    if(!ch||ch==='127.0.0.1'||ch==='localhost'||ch==='0.0.0.0'){detectAsteriskPublicIp(true);}
     const pw=document.getElementById('ast-password');
     if(pw && !astPasswordDirty) pw.value=c.password_set?(c.password_masked||''):'';
     astPasswordDirty=false;
@@ -6745,6 +6760,21 @@ async function loadAsteriskStatus(){
     setIntegrationHero('ast', false, false, t('conn_error'), '');
   }
 }
+
+async function detectAsteriskPublicIp(silent){
+  const btn=document.getElementById('ast-detect-ip-btn');
+  if(btn) btn.disabled=true;
+  try{
+    const r=await fetch('/api/asterisk/public-ip');
+    const d=await r.json();
+    if(!r.ok||!d.ok||!d.public_ip){ if(!silent) setAstMsg(t('ast_detect_ip_fail')+(d&&d.error?(': '+d.error):''),false); return; }
+    const el=document.getElementById('ast-contact-host');
+    if(el) el.value=d.public_ip;
+    if(!silent) setAstMsg(t('ast_detect_ip_ok')+': '+d.public_ip,true);
+  }catch(e){ if(!silent) setAstMsg(t('ast_detect_ip_fail'),false); }
+  finally{ if(btn) btn.disabled=false; }
+}
+
 async function saveAsterisk(){
   const body={
     enabled:!!document.getElementById('ast-enabled-input')?.checked,
@@ -6766,6 +6796,7 @@ async function saveAsterisk(){
     rtp_port_min:astNum('ast-rtp-min',30000,1,65535),
     rtp_port_max:astNum('ast-rtp-max',30100,1,65535),
     service_numbers:astList('ast-service-numbers'),
+    speed_dials:astList('ast-speed-dials'),
     codec:'PCMU'
   };
   if(astPasswordDirty) body.password=astVal('ast-password');

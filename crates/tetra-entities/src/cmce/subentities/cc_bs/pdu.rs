@@ -731,6 +731,12 @@ impl CcBsSubentity {
             return None;
         }
 
+        // Speed dials expand short TETRA codes into full SIP/PSTN numbers (9+ digits).
+        // Dial 91601 → strip 91 → "601" → "612345678".
+        if let Some(expanded) = cfg.speed_dials.get(routed) {
+            return Some(expanded.clone());
+        }
+
         if cfg.service_numbers.is_empty() {
             if !cfg.outbound_prefix.is_empty() && raw.starts_with(&cfg.outbound_prefix) {
                 return Some(routed.to_string());
@@ -1388,6 +1394,60 @@ codec = "PCMU"
         assert_eq!(cc.asterisk_route_number(&network_call(91601, "")), Some("601".to_string()));
         assert_eq!(cc.asterisk_route_number(&network_call(0, "91601")), Some("601".to_string()));
         assert_eq!(cc.asterisk_route_number(&network_call(601, "")), None);
+    }
+
+    #[cfg(feature = "asterisk")]
+    fn asterisk_speed_dial_test_cc() -> CcBsSubentity {
+        let toml = r#"
+config_version = "0.6"
+stack_mode = "Bs"
+
+[phy_io]
+backend = "None"
+
+[net_info]
+mcc = 901
+mnc = 9999
+
+[cell_info]
+main_carrier = 1584
+freq_band = 4
+freq_offset = 0
+duplex_spacing = 4
+reverse_operation = false
+location_area = 1
+
+[asterisk]
+enabled = true
+outbound_prefix = "91"
+strip_outbound_prefix = true
+codec = "PCMU"
+speed_dials = { "601" = "612345678", "100" = "912345678" }
+"#;
+        let cfg = parsing::from_toml_str(toml).expect("asterisk speed-dial test config must parse");
+        CcBsSubentity::new(SharedConfig::from_parts(cfg, None))
+    }
+
+    #[cfg(feature = "asterisk")]
+    #[test]
+    fn asterisk_route_expands_speed_dials_to_full_pstn_numbers() {
+        let cc = asterisk_speed_dial_test_cc();
+
+        // Radio dials 91601 (fits in 24-bit SSI) → strip 91 → 601 → 612345678 (9 digits).
+        assert_eq!(
+            cc.asterisk_route_number(&network_call(91601, "")),
+            Some("612345678".to_string())
+        );
+        assert_eq!(
+            cc.asterisk_route_number(&network_call(0, "91601")),
+            Some("612345678".to_string())
+        );
+        assert_eq!(
+            cc.asterisk_route_number(&network_call(91100, "")),
+            Some("912345678".to_string())
+        );
+        // Unmapped short codes still route when service_numbers is empty (open prefix).
+        assert_eq!(cc.asterisk_route_number(&network_call(91602, "")), Some("602".to_string()));
     }
 
     #[test]
