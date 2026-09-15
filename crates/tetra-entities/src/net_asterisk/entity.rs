@@ -296,7 +296,37 @@ impl AsteriskEntity {
             )
         };
 
-        let allowed_peers = resolve_allowed_peers(&asterisk_config.allow_from);
+        let mut allowed_peers = resolve_allowed_peers(&asterisk_config.allow_from);
+        // Hosted FreeSWITCH/Asterisk often answers INVITE from a different A-record than the
+        // one we picked for outbound REGISTER. Trust every resolved address for the peer.
+        allowed_peers.extend(
+            (asterisk_config.remote_host.as_str(), asterisk_config.remote_port)
+                .to_socket_addrs()
+                .into_iter()
+                .flatten()
+                .map(|addr| addr.ip()),
+        );
+        if !asterisk_config.outbound_proxy_host.trim().is_empty() {
+            allowed_peers.extend(
+                (asterisk_config.outbound_proxy_host.as_str(), asterisk_config.outbound_proxy_port)
+                    .to_socket_addrs()
+                    .into_iter()
+                    .flatten()
+                    .map(|addr| addr.ip()),
+            );
+        }
+        allowed_peers.sort();
+        allowed_peers.dedup();
+        tracing::info!(
+            "AsteriskEntity: SIP peer {} allowed_ips={:?}",
+            remote,
+            allowed_peers
+                .iter()
+                .copied()
+                .chain(std::iter::once(remote.ip()))
+                .chain(outbound_proxy.map(|p| p.ip()))
+                .collect::<Vec<_>>()
+        );
 
         let entity = Self {
             config,
@@ -430,11 +460,17 @@ impl AsteriskEntity {
         let summary = summary.into();
         let target = self.sip_send_target();
         match self.sip_socket.send_to(payload.as_bytes(), target) {
-            Ok(_) => {
+            Ok(nbytes) => {
+                tracing::info!(
+                    "AsteriskEntity: SIP TX {} -> {} ({} bytes)",
+                    summary,
+                    target,
+                    nbytes
+                );
                 self.last_tx = Some(summary);
             }
             Err(err) => {
-                self.set_error(format!("SIP send failed: {}", err));
+                self.set_error(format!("SIP send failed to {}: {}", target, err));
             }
         }
     }
@@ -442,11 +478,17 @@ impl AsteriskEntity {
     fn send_sip_to(&mut self, payload: String, addr: SocketAddr, summary: impl Into<String>) {
         let summary = summary.into();
         match self.sip_socket.send_to(payload.as_bytes(), addr) {
-            Ok(_) => {
+            Ok(nbytes) => {
+                tracing::info!(
+                    "AsteriskEntity: SIP TX {} -> {} ({} bytes)",
+                    summary,
+                    addr,
+                    nbytes
+                );
                 self.last_tx = Some(summary);
             }
             Err(err) => {
-                self.set_error(format!("SIP send failed: {}", err));
+                self.set_error(format!("SIP send failed to {}: {}", addr, err));
             }
         }
     }
@@ -1131,6 +1173,15 @@ impl AsteriskEntity {
             return;
         };
 
+        let target = self.sip_send_target();
+        tracing::info!(
+            "AsteriskEntity: starting outbound INVITE uuid={} number='{}' request_uri={} via {}",
+            brew_uuid,
+            number,
+            self.request_uri(&number),
+            target
+        );
+
         let dialog = SipDialog {
             uuid: brew_uuid,
             local_uri: self.local_uri(),
@@ -1394,13 +1445,46 @@ impl AsteriskEntity {
                 Ok((len, addr)) => {
                     // Anything that reaches this port could otherwise INVITE an arbitrary ISSI
                     // or tear down a dialog by guessing its Call-ID.
-                    if !self.peer_allowed(addr) {
-                        tracing::debug!("AsteriskEntity: dropping SIP datagram from unexpected source {}", addr);
-                        continue;
-                    }
                     if let Some(msg) = SipMessage::parse(&buf[..len]) {
+                        if !self.peer_allowed(addr) {
+                            // Still accept in-dialog / transaction responses whose Call-ID we
+                            // already know — hosted PBXes often answer INVITE from another IP.
+                            let known = msg
+                                .call_id()
+                                .is_some_and(|cid| self.find_dialog_by_call_id(Some(cid)).is_some())
+                                || msg
+                                    .call_id()
+                                    .is_some_and(|cid| cid == self.register_call_id);
+                            if !known {
+                                tracing::warn!(
+                                    "AsteriskEntity: dropping SIP datagram from unexpected source {} ({})",
+                                    addr,
+                                    msg.start_line
+                                );
+                                continue;
+                            }
+                            tracing::info!(
+                                "AsteriskEntity: accepting SIP from {} (matched known Call-ID, learning peer)",
+                                addr
+                            );
+                            if !self.allowed_peers.contains(&addr.ip()) {
+                                self.allowed_peers.push(addr.ip());
+                            }
+                        }
                         self.last_rx = Some(format!("{} from {}", msg.start_line, addr));
+                        if msg.method().is_none() {
+                            tracing::info!(
+                                "AsteriskEntity: SIP RX {} from {}",
+                                msg.start_line,
+                                addr
+                            );
+                        }
                         self.handle_sip_message(queue, msg, addr);
+                    } else if !self.peer_allowed(addr) {
+                        tracing::warn!(
+                            "AsteriskEntity: dropping unparsable SIP datagram from unexpected source {}",
+                            addr
+                        );
                     }
                 }
                 Err(err) if err.kind() == io::ErrorKind::WouldBlock => break,
