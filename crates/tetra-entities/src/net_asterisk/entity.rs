@@ -87,6 +87,11 @@ struct SipDialog {
     cseq: u32,
     /// Top Via branch of the INVITE. CANCEL and non-2xx ACK belong to that same transaction.
     invite_branch: String,
+    /// Exact INVITE datagram for RFC 3261 Timer A retransmits (same branch/CSeq/body).
+    invite_payload: Option<String>,
+    invite_sent_at: Option<Instant>,
+    invite_retransmits: u32,
+    invite_got_provisional: bool,
     /// Contact of the answer, i.e. where in-dialog requests must actually go.
     remote_target: Option<String>,
     auth: Option<DigestChallenge>,
@@ -427,20 +432,6 @@ impl AsteriskEntity {
         format!("sip:{}@{}", self.asterisk_config.local_user, self.asterisk_config.from_domain)
     }
 
-    fn uri_for_user(&self, user: &str) -> String {
-        format!("sip:{}@{}", user, self.asterisk_config.from_domain)
-    }
-
-    fn asserted_identity_headers(&self, uri: &str, display: &str) -> String {
-        if display.is_empty() {
-            return String::new();
-        }
-        format!(
-            "P-Asserted-Identity: \"{}\" <{}>\r\nRemote-Party-ID: \"{}\" <{}>;party=calling;screen=yes;privacy=off\r\n",
-            display, uri, display, uri
-        )
-    }
-
     fn contact_uri(&self) -> String {
         format!(
             "sip:{}@{}:{}",
@@ -601,17 +592,10 @@ impl AsteriskEntity {
         let auth_line = auth.map(|line| format!("{}\r\n", line)).unwrap_or_default();
         let to_uri = request_uri.clone();
         let from_uri = snapshot.local_uri.clone();
-        let caller_id = snapshot
-            .source_issi
-            .filter(|source| *source != 0)
-            .map(|source| source.to_string())
-            .unwrap_or_else(|| self.asterisk_config.local_user.clone());
-        let identity_uri = snapshot
-            .source_issi
-            .filter(|source| *source != 0)
-            .map(|source| self.uri_for_user(&source.to_string()))
-            .unwrap_or_else(|| from_uri.clone());
-        let identity_headers = self.asserted_identity_headers(&identity_uri, &caller_id);
+        // Hosted FreeSWITCH/Asterisk expect the registered extension in From, like Zoiper.
+        // Do not put the TETRA ISSI in From/PAI — that URI does not exist on the PBX and some
+        // sofia profiles drop the INVITE before creating a transaction (CANCEL then gets 481).
+        let caller_id = self.asterisk_config.local_user.clone();
         Some(format!(
             "INVITE {} SIP/2.0\r\n\
              Via: SIP/2.0/UDP {}:{};branch={};rport\r\n\
@@ -623,7 +607,7 @@ impl AsteriskEntity {
              Contact: <{}>\r\n\
              Allow: INVITE, ACK, CANCEL, OPTIONS, BYE, INFO\r\n\
              Supported: replaces\r\n\
-             {}\
+             User-Agent: FlowStation\r\n\
              {}\
              Content-Type: application/sdp\r\n\
              Content-Length: {}\r\n\r\n{}",
@@ -638,7 +622,6 @@ impl AsteriskEntity {
             snapshot.call_id_header,
             snapshot.cseq,
             self.contact_uri(),
-            identity_headers,
             auth_line,
             body.as_bytes().len(),
             body
@@ -646,9 +629,25 @@ impl AsteriskEntity {
     }
 
     fn send_invite(&mut self, uuid: Uuid) {
-        if let Some(request) = self.build_invite(uuid) {
-            self.send_sip(request, format!("INVITE {}", uuid));
+        let Some(request) = self.build_invite(uuid) else {
+            self.set_error(format!("failed to build INVITE for uuid={}", uuid));
+            return;
+        };
+        let has_auth = request.contains("Authorization:") || request.contains("Proxy-Authorization:");
+        tracing::info!(
+            "AsteriskEntity: INVITE ready uuid={} auth={} bytes={} preview={}",
+            uuid,
+            has_auth,
+            request.len(),
+            request.lines().take(3).collect::<Vec<_>>().join(" | ")
+        );
+        if let Some(dialog) = self.dialogs.get_mut(&uuid) {
+            dialog.invite_payload = Some(request.clone());
+            dialog.invite_sent_at = Some(Instant::now());
+            dialog.invite_retransmits = 0;
+            dialog.invite_got_provisional = false;
         }
+        self.send_sip(request, format!("INVITE {}", uuid));
     }
 
     fn send_bye_or_cancel(&mut self, uuid: Uuid, cancel: bool) {
@@ -1054,6 +1053,10 @@ impl AsteriskEntity {
             remote_tag,
             cseq: 1,
             invite_branch: String::new(),
+            invite_payload: None,
+            invite_sent_at: None,
+            invite_retransmits: 0,
+            invite_got_provisional: false,
             remote_target: Self::parse_contact_uri(msg.header("Contact")),
             auth: None,
             auth_retry_sent: false,
@@ -1192,6 +1195,10 @@ impl AsteriskEntity {
             remote_tag: None,
             cseq: 1,
             invite_branch: String::new(),
+            invite_payload: None,
+            invite_sent_at: None,
+            invite_retransmits: 0,
+            invite_got_provisional: false,
             remote_target: None,
             auth: None,
             auth_retry_sent: false,
@@ -1554,8 +1561,16 @@ impl AsteriskEntity {
 
     fn handle_invite_response(&mut self, queue: &mut MessageQueue, msg: &SipMessage, code: u16) {
         let Some(uuid) = self.find_dialog_by_call_id(msg.call_id()) else {
+            tracing::warn!(
+                "AsteriskEntity: INVITE response {} for unknown Call-ID {:?}",
+                code,
+                msg.call_id()
+            );
             return;
         };
+        if let Some(dialog) = self.dialogs.get_mut(&uuid) {
+            dialog.invite_got_provisional = true;
+        }
         // The radio already hung up and we CANCELled; CMCE has been told, so from here on we
         // only have to close the SIP leg down cleanly.
         let cancelling = self.dialogs.get(&uuid).is_some_and(|d| d.state == DialogState::Cancelling);
@@ -1644,6 +1659,14 @@ impl AsteriskEntity {
                         should_retry = true;
                     }
                     if should_retry {
+                        if let Some(dialog) = self.dialogs.get_mut(&uuid) {
+                            dialog.invite_payload = None;
+                        }
+                        tracing::info!(
+                            "AsteriskEntity: INVITE uuid={} got {}, retrying with digest auth",
+                            uuid,
+                            code
+                        );
                         self.send_invite(uuid);
                     }
                 }
@@ -1673,6 +1696,36 @@ impl AsteriskEntity {
 
     fn maybe_periodic_sip(&mut self) {
         let now = Instant::now();
+
+        // RFC 3261 Timer A: retransmit unanswered INVITEs over UDP (500ms, 1s, 2s, ...).
+        let mut retransmit: Vec<(Uuid, String)> = Vec::new();
+        for (uuid, dialog) in &mut self.dialogs {
+            if dialog.inbound || dialog.invite_got_provisional {
+                continue;
+            }
+            if !matches!(dialog.state, DialogState::Inviting) {
+                continue;
+            }
+            let Some(sent_at) = dialog.invite_sent_at else {
+                continue;
+            };
+            let Some(payload) = dialog.invite_payload.clone() else {
+                continue;
+            };
+            if dialog.invite_retransmits >= 6 {
+                continue;
+            }
+            let wait = Duration::from_millis(500u64 << dialog.invite_retransmits.min(5));
+            if now.duration_since(sent_at) >= wait {
+                dialog.invite_retransmits = dialog.invite_retransmits.saturating_add(1);
+                dialog.invite_sent_at = Some(now);
+                retransmit.push((*uuid, payload));
+            }
+        }
+        for (uuid, payload) in retransmit {
+            tracing::info!("AsteriskEntity: INVITE retransmit uuid={}", uuid);
+            self.send_sip(payload, format!("INVITE retransmit {}", uuid));
+        }
 
         // A cancelled INVITE whose final response never showed up would otherwise pin its RTP port.
         let stale: Vec<Uuid> = self
