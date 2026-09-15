@@ -3164,7 +3164,7 @@ tbody tr:hover td{background:color-mix(in srgb,var(--bg3) 70%, transparent);}
             <label class="h-flabel" data-i18n="ast_outbound_proxy_port">Proxy port</label>
             <input type="number" id="ast-proxy-port" class="form-input" min="1" max="65535" placeholder="5060">
             <label class="h-flabel" data-i18n="ast_contact_host">Contact / public IP of this Pi</label>
-            <input type="text" id="ast-contact-host" class="form-input" placeholder="192.168.1.50">
+            <input type="text" id="ast-contact-host" class="form-input" placeholder="YOUR.PI.PUBLIC.IP">
             <label class="h-flabel" data-i18n="ast_bind_addr">Listen address</label>
             <input type="text" id="ast-bind-addr" class="form-input" placeholder="0.0.0.0">
             <label class="h-flabel" data-i18n="ast_bind_port">Listen port</label>
@@ -4340,7 +4340,7 @@ const LANGS={
     ast_local_user:'Extension / username',ast_auth_user:'Auth username',ast_password:'Password',
     ast_domain:'SIP domain',ast_realm:'Auth realm',ast_remote_host:'SIP server',ast_remote_port:'SIP port',
     ast_outbound_proxy_host:'Outbound proxy (optional)',ast_outbound_proxy_port:'Proxy port',
-    ast_contact_host:'Contact / public IP of this Pi',ast_bind_addr:'Listen address',ast_bind_port:'Listen port',
+    ast_contact_host:'Contact = public IP of THIS Pi (not the PBX)',ast_bind_addr:'Listen address',ast_bind_port:'Listen port',
     ast_out_prefix:'Outbound prefix (TETRA → SIP)',ast_in_prefix:'Inbound prefix (SIP → TETRA)',
     ast_rtp_min:'RTP port min',ast_rtp_max:'RTP port max',ast_service_numbers:'Allowed SIP numbers',
     ast_save_help:'Save writes config.toml. If the SIP client is already installed, FlowStation restarts to register with the PBX. Group calls, Brew, SDS and the rest of the stack are unchanged.',
@@ -6758,7 +6758,7 @@ async function saveAsterisk(){
     remote_port:astNum('ast-remote-port',5060,1,65535),
     outbound_proxy_host:astVal('ast-proxy-host'),
     outbound_proxy_port:astNum('ast-proxy-port',5060,1,65535),
-    contact_host:astVal('ast-contact-host')||astVal('ast-remote-host'),
+    contact_host:astVal('ast-contact-host'),
     bind_addr:astVal('ast-bind-addr')||'0.0.0.0',
     bind_port:astNum('ast-bind-port',5062,1,65535),
     outbound_prefix:astVal('ast-out-prefix'),

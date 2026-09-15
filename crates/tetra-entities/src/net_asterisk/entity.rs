@@ -355,6 +355,24 @@ impl AsteriskEntity {
             last_tx: None,
             last_error: None,
         };
+        if entity
+            .asterisk_config
+            .contact_host
+            .trim()
+            .eq_ignore_ascii_case(entity.asterisk_config.remote_host.trim())
+            || entity
+                .asterisk_config
+                .contact_host
+                .trim()
+                .eq_ignore_ascii_case(entity.asterisk_config.from_domain.trim())
+        {
+            tracing::warn!(
+                "AsteriskEntity: contact_host='{}' must be THIS Pi public IP, not PBX '{}' / domain '{}'. Outbound INVITE will likely get no response (CANCEL 481).",
+                entity.asterisk_config.contact_host,
+                entity.asterisk_config.remote_host,
+                entity.asterisk_config.from_domain
+            );
+        }
         entity.refresh_status();
         Ok(entity)
     }
@@ -634,13 +652,35 @@ impl AsteriskEntity {
             return;
         };
         let has_auth = request.contains("Authorization:") || request.contains("Proxy-Authorization:");
+        let from_line = request
+            .lines()
+            .find(|l| l.to_ascii_lowercase().starts_with("from:"))
+            .unwrap_or("");
+        let contact_line = request
+            .lines()
+            .find(|l| l.to_ascii_lowercase().starts_with("contact:"))
+            .unwrap_or("");
         tracing::info!(
-            "AsteriskEntity: INVITE ready uuid={} auth={} bytes={} preview={}",
+            "AsteriskEntity: INVITE ready uuid={} auth={} bytes={} {} | {} | preview={}",
             uuid,
             has_auth,
             request.len(),
-            request.lines().take(3).collect::<Vec<_>>().join(" | ")
+            from_line,
+            contact_line,
+            request.lines().take(2).collect::<Vec<_>>().join(" | ")
         );
+        if self.asterisk_config.contact_host.trim().eq_ignore_ascii_case(self.asterisk_config.remote_host.trim())
+            || self
+                .asterisk_config
+                .contact_host
+                .trim()
+                .eq_ignore_ascii_case(self.asterisk_config.from_domain.trim())
+        {
+            tracing::warn!(
+                "AsteriskEntity: contact_host='{}' looks like the PBX — set it to this Pi public IP or INVITE may be dropped",
+                self.asterisk_config.contact_host
+            );
+        }
         if let Some(dialog) = self.dialogs.get_mut(&uuid) {
             dialog.invite_payload = Some(request.clone());
             dialog.invite_sent_at = Some(Instant::now());

@@ -258,6 +258,17 @@ pub fn apply_asterisk_patch(src: CfgAsteriskDto) -> Result<CfgAsterisk, String> 
         if src.contact_host.trim().is_empty() {
             return Err("asterisk: contact_host cannot be empty when enabled".to_string());
         }
+        // Via/Contact/SDP must advertise THIS station, not the PBX. Using the PBX hostname
+        // here makes FreeSWITCH drop outbound INVITEs (CANCEL then returns 481).
+        let contact = src.contact_host.trim().to_ascii_lowercase();
+        let remote = src.remote_host.trim().to_ascii_lowercase();
+        let domain = src.from_domain.trim().to_ascii_lowercase();
+        if !contact.is_empty() && (contact == remote || (!domain.is_empty() && contact == domain)) {
+            return Err(
+                "asterisk: contact_host must be the public IP/hostname of THIS Pi, not the PBX (remote_host/from_domain)"
+                    .to_string(),
+            );
+        }
         if src.local_user.trim().is_empty() {
             return Err("asterisk: local_user cannot be empty when enabled".to_string());
         }
