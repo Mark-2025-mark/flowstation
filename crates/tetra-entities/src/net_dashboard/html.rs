@@ -3118,7 +3118,7 @@ tbody tr:hover td{background:color-mix(in srgb,var(--bg3) 70%, transparent);}
           </div>
         </div>
         <div class="card-body">
-          <p class="sds-empty" id="ast-install-help" data-i18n="ast_install_help">Compiles tetra-codec and rebuilds FlowStation with SIP support. On a Raspberry Pi 3B+ this takes 15–40 minutes; the station restarts when it finishes. Does not install a local PBX — you keep using your existing Asterisk or FreeSWITCH.</p>
+          <p class="sds-empty" id="ast-install-help" data-i18n="ast_install_help">Compiles tetra-codec and rebuilds FlowStation with SIP support. On a Raspberry Pi 3B+ (1 GB RAM) this enables swap and builds with -j1; expect 45–120 minutes. Do not power off — long pauses on Compiling tetra-entities are normal. Does not install a local PBX.</p>
         </div>
       </div>
 
@@ -4332,8 +4332,8 @@ const LANGS={
     asterisk_title:'SIP Client (PBX)',ast_configured:'Configured',ast_register:'REGISTER',ast_sip_listen:'SIP listen',
     ast_remote:'SIP server',ast_outbound_proxy:'Outbound proxy',ast_rtp:'RTP ports',ast_codec:'Codec',ast_last_rx:'Last RX',
     ast_last_tx:'Last TX',ast_last_error:'Last error',
-    ast_install_title:'Install SIP Client',ast_install:'Install',ast_install_help:'Compiles tetra-codec and rebuilds FlowStation with SIP support. On a Raspberry Pi 3B+ this takes 15–40 minutes; the station restarts when it finishes. Does not install a local PBX — you keep using your existing Asterisk or FreeSWITCH.',
-    ast_install_confirm:'Install the SIP client now?\n\nThis compiles tetra-codec and rebuilds FlowStation with SIP support (15–40 min on a Pi 3B+). The station restarts when done. Group calls, Brew, SDS and other features stay in place.',
+    ast_install_title:'Install SIP Client',ast_install:'Install',ast_install_help:'Compiles tetra-codec and rebuilds FlowStation with SIP support. On a Raspberry Pi 3B+ (1 GB RAM) this enables swap and builds with -j1; expect 45–120 minutes. Do not power off — long pauses on Compiling tetra-entities are normal. Does not install a local PBX.',
+    ast_install_confirm:'Install the SIP client now?\n\nThis compiles tetra-codec and rebuilds FlowStation with SIP support. On a Pi 3B+ (1 GB) it enables 2 GB swap and uses -j1 (often 45–120 min). The station restarts when done. Do not power off.',
     ast_install_running:'Installing SIP client…',
     ast_account:'SIP account (Zoiper-style)',ast_enable:'Enable SIP client (register as a PBX extension)',
     ast_register_enable:'REGISTER with the PBX',ast_strip_prefix:'Strip outbound prefix before dialling SIP',

@@ -282,6 +282,28 @@ If you run FlowStation behind a firewall, open the ports that match your config:
 | Asterisk SIP | UDP/TCP 5060 | outbound/inbound to PBX |
 | DAPNET RWTH core | TCP 43434 | outbound |
 
+### SIP Install on Raspberry Pi 3B+ (1 GB RAM)
+
+The dashboard **Install** button detects low RAM and:
+
+1. Creates a **2 GiB swap file** at `/var/tmp/flowstation-build.swap` (reused on later runs)
+2. Builds with **`cargo -j1`**, incremental off, LTO off, codegen-units=16
+3. Compiles **`tetra-entities` first**, then **`bluestation-bs`** (staged)
+
+Expect **45–120 minutes**. Long pauses on `Compiling tetra-entities` / `soapysdr-sys` mean LLVM is using swap — wait; do not reboot.
+
+If Install still fails, create swap manually and retry:
+
+```bash
+sudo fallocate -l 2G /var/tmp/flowstation-build.swap
+sudo chmod 600 /var/tmp/flowstation-build.swap
+sudo mkswap /var/tmp/flowstation-build.swap
+sudo swapon /var/tmp/flowstation-build.swap
+sudo sysctl vm.swappiness=80
+```
+
+Then open the dashboard SIP Client page and click **Install** again.
+
 ### SIP client / PBX bridge (Asterisk, FreeSWITCH, 3CX, …)
 
 FlowStation includes a built-in SIP client (like Zoiper) that registers as an
