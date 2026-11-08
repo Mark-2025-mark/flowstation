@@ -17,6 +17,7 @@ use super::demodulator;
 use super::dsp_types::*;
 use super::fcfb;
 use super::modulator;
+use super::pmr_parrot::PmrParrot;
 use super::soapyio;
 
 pub struct SdrConfig<'a> {
@@ -52,6 +53,11 @@ pub struct RxTxDevSoapySdr {
     cfg: SharedConfig,
     /// Last observed hold state so we only log transitions.
     last_pmr_hold: bool,
+    /// TETRA LO frequencies to restore when exclusive PMR releases the radio.
+    tetra_rx_hz: f64,
+    tetra_tx_hz: f64,
+    /// Live NBFM parrot while exclusive PMR holds RF.
+    pmr_parrot: Option<PmrParrot>,
 }
 
 type FftPlanner = rustfft::FftPlanner<RealSample>;
@@ -171,14 +177,17 @@ impl RxTxDevSoapySdr {
 
         let health_telemetry = telemetry.clone();
 
+        let tetra_rx_hz = sdr.rx_center_frequency().unwrap_or(0.0);
+        let tetra_tx_hz = sdr.tx_center_frequency().unwrap_or(0.0);
+
         let initial_hold = cfg.pmr_holds_tetra_rf();
         if initial_hold {
             tracing::warn!(
-                "PMR exclusive RF is active at PHY start — TETRA TX will stay muted until PMR is disabled"
+                "PMR exclusive RF is active at PHY start — entering NBFM parrot (TETRA off-air)"
             );
         }
 
-        Self {
+        let mut this = Self {
             rx_dsp: if sdr.rx_enabled() {
                 Some(RxDsp::new(&mut fft_planner, &mut sdr, &phy_config))
             } else {
@@ -195,8 +204,62 @@ impl RxTxDevSoapySdr {
 
             sdr,
             cfg: cfg.clone(),
-            last_pmr_hold: initial_hold,
+            last_pmr_hold: false,
+            tetra_rx_hz,
+            tetra_tx_hz,
+            pmr_parrot: None,
+        };
+        if initial_hold {
+            this.enter_pmr_parrot();
+            this.last_pmr_hold = true;
         }
+        this
+    }
+
+    fn enter_pmr_parrot(&mut self) {
+        let pmr = self.cfg.effective_pmr_repeater();
+        let Some(hz) = pmr.resolved_tx_hz().map(|h| h as f64) else {
+            tracing::error!("PMR parrot: cannot resolve TX frequency — staying on TETRA mute only");
+            return;
+        };
+        // Same channel for parrot; RX uses the same LO (no 20 kHz TETRA offset).
+        if let Err(e) = self.sdr.set_rx_frequency(hz) {
+            tracing::error!("PMR parrot: RX retune failed: {e}");
+            return;
+        }
+        if let Err(e) = self.sdr.set_tx_frequency(hz) {
+            tracing::error!("PMR parrot: TX retune failed: {e}");
+            return;
+        }
+        self.sdr.reset_timing();
+        let fs = self.sdr.rx_sample_rate();
+        self.pmr_parrot = Some(PmrParrot::new(fs, &pmr));
+        tracing::warn!(
+            "PMR parrot ON — {:.6} MHz mode={} hang={}ms (TETRA off-air)",
+            hz / 1e6,
+            pmr.mode,
+            pmr.hangtime_ms
+        );
+    }
+
+    fn leave_pmr_parrot(&mut self) {
+        self.pmr_parrot = None;
+        if self.tetra_rx_hz > 0.0 {
+            if let Err(e) = self.sdr.set_rx_frequency(self.tetra_rx_hz) {
+                tracing::error!("PMR parrot: restore RX failed: {e}");
+            }
+        }
+        if self.tetra_tx_hz > 0.0 {
+            if let Err(e) = self.sdr.set_tx_frequency(self.tetra_tx_hz) {
+                tracing::error!("PMR parrot: restore TX failed: {e}");
+            }
+        }
+        self.sdr.reset_timing();
+        tracing::info!(
+            "PMR parrot OFF — restored TETRA LO RX={:.6} TX={:.6} MHz",
+            self.tetra_rx_hz / 1e6,
+            self.tetra_tx_hz / 1e6
+        );
     }
 
     /// Process a block of received signal.
@@ -247,6 +310,30 @@ impl RxTxDev for RxTxDevSoapySdr {
         tx_slot: &[TxSlotBits],
         // TODO multiple demodulators
     ) -> Result<Vec<Option<RxSlotBits<'a>>>, RxTxDevError> {
+        let hold = self.cfg.pmr_holds_tetra_rf();
+        if hold != self.last_pmr_hold {
+            if hold {
+                self.enter_pmr_parrot();
+            } else {
+                self.leave_pmr_parrot();
+            }
+            self.last_pmr_hold = hold;
+        }
+
+        // Exclusive PMR: run the NBFM parrot instead of TETRA DSP this timeslot.
+        if hold && self.pmr_parrot.is_some() {
+            // Several parrot ticks per TETRA timeslot so we keep up with the IQ stream.
+            for _ in 0..8 {
+                if let Some(parrot) = self.pmr_parrot.as_mut() {
+                    parrot.tick(&mut self.sdr)?;
+                }
+            }
+            if let Some(health) = &mut self.health {
+                health.tick(&self.sdr);
+            }
+            return Ok(Default::default());
+        }
+
         // First generate as much TX signal as possible at the moment.
         while self.process_tx_block(tx_slot)? {}
 

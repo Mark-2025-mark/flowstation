@@ -3926,9 +3926,9 @@ fn serve_pmr_repeater_get(stream: TcpStream, shared_config: &Option<tetra_config
     let rf_status = if !pmr.enabled {
         "disabled"
     } else if tetra_paused {
-        "tetra_paused_awaiting_rf_modem"
+        "parrot_on_air"
     } else {
-        "configured_awaiting_rf_modem"
+        "enabled_shared_rf_no_parrot"
     };
     let body = serde_json::json!({
         "enabled": pmr.enabled,
@@ -3946,9 +3946,8 @@ fn serve_pmr_repeater_get(stream: TcpStream, shared_config: &Option<tetra_config
         "exclusive_rf": pmr.exclusive_rf,
         "tetra_paused": tetra_paused,
         "duplex_ok": duplex_ok,
-        // Exclusive RF mutes TETRA TX live; analog FM modem on the SXceiver is next.
         "rf_status": rf_status,
-        "note": "Parrot = same channel store-and-forward (loro). Exclusive RF pauses TETRA TX while PMR is on."
+        "note": "Exclusive RF + enable = NBFM loro on the SXceiver (TETRA off). Disable PMR to resume TETRA."
     });
     http_json_response(stream, 200, &body.to_string());
 }
@@ -4044,16 +4043,16 @@ fn serve_pmr_repeater_post(
     let rf_status = if !ov.enabled {
         "disabled"
     } else if tetra_paused {
-        "tetra_paused_awaiting_rf_modem"
+        "parrot_on_air"
     } else {
-        "configured_awaiting_rf_modem"
+        "enabled_shared_rf_no_parrot"
     };
     let message = if tetra_paused {
-        "Saved. TETRA TX muted (exclusive RF). Disable PMR to resume TETRA. Analog FM modem is next."
+        "Saved. Loro NBFM on-air (TETRA paused). Key on the channel, unkey, wait hangtime — station repeats. Disable PMR to resume TETRA."
     } else if ov.enabled {
-        "Saved. PMR on without exclusive RF — TETRA keeps transmitting. Analog FM modem is next."
+        "Saved. PMR enabled but exclusive RF is off — loro needs exclusive RF to take the SXceiver."
     } else {
-        "Saved. PMR off — TETRA TX resumed."
+        "Saved. PMR off — TETRA resumed."
     };
 
     tracing::info!(
@@ -5463,6 +5462,11 @@ fn serve_asterisk_status(stream: TcpStream, shared_config: &Option<tetra_config:
                     "strip_outbound_prefix": a.strip_outbound_prefix,
                     "inbound_prefix": a.inbound_prefix.clone(),
                     "service_numbers": a.service_numbers.clone(),
+                    "speed_dials": a
+                        .speed_dials
+                        .iter()
+                        .map(|(k, v)| format!("{k}={v}"))
+                        .collect::<Vec<_>>(),
                     "local_user": a.local_user.clone(),
                     "auth_user": a.auth_user.clone(),
                     "realm": a.realm.clone(),
@@ -5518,6 +5522,38 @@ fn serve_asterisk_status(stream: TcpStream, shared_config: &Option<tetra_config:
 
 /// POST /api/asterisk — persist Zoiper-style SIP account settings and restart when the
 /// SIP feature is compiled in so the in-process client reconnects with the new account.
+fn parse_asterisk_speed_dials(
+    json: &serde_json::Value,
+    fallback: &std::collections::HashMap<String, String>,
+) -> std::collections::HashMap<String, String> {
+    let mut out = std::collections::HashMap::new();
+    if let Some(arr) = json.get("speed_dials").and_then(|v| v.as_array()) {
+        for item in arr {
+            let Some(s) = item.as_str() else { continue };
+            let Some((k, v)) = s.split_once('=') else { continue };
+            let k = k.trim();
+            let v = v.trim();
+            if !k.is_empty() && !v.is_empty() {
+                out.insert(k.to_string(), v.to_string());
+            }
+        }
+        return out;
+    }
+    if let Some(obj) = json.get("speed_dials").and_then(|v| v.as_object()) {
+        for (k, v) in obj {
+            if let Some(val) = v.as_str() {
+                let k = k.trim();
+                let val = val.trim();
+                if !k.is_empty() && !val.is_empty() {
+                    out.insert(k.to_string(), val.to_string());
+                }
+            }
+        }
+        return out;
+    }
+    fallback.clone()
+}
+
 fn serve_asterisk_post(
     stream: TcpStream,
     shared_config: &Option<tetra_config::bluestation::SharedConfig>,
@@ -5547,6 +5583,7 @@ fn serve_asterisk_post(
         register: dapnet_as_bool(&json, "register", cur.register),
         codec: dapnet_as_string(&json, "codec", &cur.codec),
         service_numbers: snom_string_list(&json, "service_numbers", &cur.service_numbers),
+        speed_dials: parse_asterisk_speed_dials(&json, &cur.speed_dials),
         rtp_port_min: dapnet_as_u16(&json, "rtp_port_min", cur.rtp_port_min),
         rtp_port_max: dapnet_as_u16(&json, "rtp_port_max", cur.rtp_port_max),
         bind_addr: dapnet_as_string(&json, "bind_addr", &cur.bind_addr),

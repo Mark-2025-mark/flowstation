@@ -880,4 +880,4 @@ voice_service = true
 # ctcss_hz = 0.0
 # hangtime_ms = 1000
 # min_duplex_split_hz = 100000
-# exclusive_rf = true      # mute TETRA TX while PMR is on; disable PMR to resume TETRA
+# exclusive_rf = true      # take SXceiver for NBFM loro; disable PMR to resume TETRA
