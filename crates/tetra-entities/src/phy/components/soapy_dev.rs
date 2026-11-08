@@ -48,6 +48,10 @@ pub struct RxTxDevSoapySdr {
     rx_dsp: Option<RxDsp>,
     tx_dsp: Option<TxDsp>,
     health: Option<SdrHealthMonitor>,
+    /// Shared stack config — used to read the lock-free PMR exclusive-RF hold flag.
+    cfg: SharedConfig,
+    /// Last observed hold state so we only log transitions.
+    last_pmr_hold: bool,
 }
 
 type FftPlanner = rustfft::FftPlanner<RealSample>;
@@ -167,6 +171,13 @@ impl RxTxDevSoapySdr {
 
         let health_telemetry = telemetry.clone();
 
+        let initial_hold = cfg.pmr_holds_tetra_rf();
+        if initial_hold {
+            tracing::warn!(
+                "PMR exclusive RF is active at PHY start — TETRA TX will stay muted until PMR is disabled"
+            );
+        }
+
         Self {
             rx_dsp: if sdr.rx_enabled() {
                 Some(RxDsp::new(&mut fft_planner, &mut sdr, &phy_config))
@@ -183,6 +194,8 @@ impl RxTxDevSoapySdr {
             health: health_telemetry.map(SdrHealthMonitor::new),
 
             sdr,
+            cfg: cfg.clone(),
+            last_pmr_hold: initial_hold,
         }
     }
 
@@ -204,7 +217,21 @@ impl RxTxDevSoapySdr {
     fn process_tx_block(&mut self, tx_slot: &[TxSlotBits]) -> Result<bool, RxTxDevError> {
         if let Some(tx_dsp) = &mut self.tx_dsp {
             if self.sdr.tx_possible() {
-                tx_dsp.process_block(&mut self.sdr, self.rx_dsp.as_ref().map(|rx_dsp| rx_dsp.rx_block_count), tx_slot)
+                let mute = self.cfg.pmr_holds_tetra_rf();
+                if mute != self.last_pmr_hold {
+                    if mute {
+                        tracing::warn!("PMR exclusive RF ON — muting TETRA TX (loro holds the radio)");
+                    } else {
+                        tracing::info!("PMR exclusive RF OFF — resuming TETRA TX");
+                    }
+                    self.last_pmr_hold = mute;
+                }
+                tx_dsp.process_block(
+                    &mut self.sdr,
+                    self.rx_dsp.as_ref().map(|rx_dsp| rx_dsp.rx_block_count),
+                    tx_slot,
+                    mute,
+                )
             } else {
                 Ok(false)
             }
@@ -488,6 +515,9 @@ impl TxDsp {
         sdr: &mut soapyio::SoapyIo,
         latest_rx_block: Option<fcfb::BlockCount>,
         tx_slot: &[TxSlotBits],
+        // When true (exclusive PMR hold), keep the TX timeline alive with zeros
+        // so TETRA leaves the air; modulators still advance so unmute is clean.
+        mute_tetra: bool,
     ) -> Result<bool, RxTxDevError> {
         let current_sample = sdr.tx_current_count()?;
         // Current time as block count
@@ -539,7 +569,7 @@ impl TxDsp {
         // keeping up with the TX timeline and hitting "Too late to produce TX
         // block N" warnings every few seconds. See FH-BUG (ES4TIX) for the
         // v0.2.2 regression report.
-        let want_monitor = self.monitor.as_ref().map(|m| m.should_emit()).unwrap_or(false);
+        let want_monitor = !mute_tetra && self.monitor.as_ref().map(|m| m.should_emit()).unwrap_or(false);
 
         // Compute sample count using the (still-current) block_count before we
         // bump it, otherwise sdr.transmit gets a count that's one block ahead.
@@ -550,10 +580,14 @@ impl TxDsp {
         // call it exactly once. When the monitor is active, we copy into the
         // scratch buffer (reused across blocks, allocates once); otherwise we
         // hand the &[ComplexSample] straight to sdr.transmit.
-        if want_monitor {
+        // Exclusive PMR mute: always drain fcfb into scratch, then overwrite with
+        // zeros so the synthesis pipeline stays in sync while RF stays quiet.
+        if mute_tetra || want_monitor {
             self.tx_signal_scratch.clear();
             self.tx_signal_scratch.extend_from_slice(self.fcfb.process());
-            if let Some(monitor) = self.monitor.as_mut() {
+            if mute_tetra {
+                self.tx_signal_scratch.fill(ComplexSample::ZERO);
+            } else if let Some(monitor) = self.monitor.as_mut() {
                 monitor.observe(&self.tx_signal_scratch, tx_slot, self.block_count);
             }
         }
@@ -562,7 +596,7 @@ impl TxDsp {
         // so we do not end up producing the same block again even if transmit fails.
         self.block_count += 1;
 
-        if want_monitor {
+        if mute_tetra || want_monitor {
             let sdr_sample_count = self.tx_signal_scratch.len() as SampleCount * block_count_now;
             sdr.transmit(&self.tx_signal_scratch, Some(sdr_sample_count))?;
         } else {

@@ -3910,15 +3910,26 @@ fn serve_whitelist_post(
 
 /// GET /api/pmr-repeater — dashboard switch + resolved PMR446 frequencies.
 fn serve_pmr_repeater_get(stream: TcpStream, shared_config: &Option<tetra_config::bluestation::SharedConfig>) {
-    let pmr = match shared_config {
-        Some(cfg) => cfg.effective_pmr_repeater(),
-        None => tetra_config::bluestation::CfgPmrRepeater::default(),
+    let (pmr, tetra_paused) = match shared_config {
+        Some(cfg) => {
+            let pmr = cfg.effective_pmr_repeater();
+            let tetra_paused = cfg.pmr_holds_tetra_rf();
+            (pmr, tetra_paused)
+        }
+        None => (tetra_config::bluestation::CfgPmrRepeater::default(), false),
     };
     let tx_hz = pmr.resolved_tx_hz();
     let rx_hz = pmr.resolved_rx_hz();
     let split = pmr.split_hz();
     let duplex_ok = matches!((split, pmr.mode.as_str()), (Some(s), "duplex") if s >= pmr.min_duplex_split_hz)
         || pmr.mode != "duplex";
+    let rf_status = if !pmr.enabled {
+        "disabled"
+    } else if tetra_paused {
+        "tetra_paused_awaiting_rf_modem"
+    } else {
+        "configured_awaiting_rf_modem"
+    };
     let body = serde_json::json!({
         "enabled": pmr.enabled,
         "mode": pmr.mode,
@@ -3933,10 +3944,11 @@ fn serve_pmr_repeater_get(stream: TcpStream, shared_config: &Option<tetra_config
         "hangtime_ms": pmr.hangtime_ms,
         "min_duplex_split_hz": pmr.min_duplex_split_hz,
         "exclusive_rf": pmr.exclusive_rf,
+        "tetra_paused": tetra_paused,
         "duplex_ok": duplex_ok,
-        // Config/UI is live; analog FM modem on the SXceiver is the next RF step.
-        "rf_status": if pmr.enabled { "configured_awaiting_rf_modem" } else { "disabled" },
-        "note": "Parrot = same channel store-and-forward (loro). Simplex_relay = RX then TX (channels may differ). Duplex needs ≥100 kHz split."
+        // Exclusive RF mutes TETRA TX live; analog FM modem on the SXceiver is next.
+        "rf_status": rf_status,
+        "note": "Parrot = same channel store-and-forward (loro). Exclusive RF pauses TETRA TX while PMR is on."
     });
     http_json_response(stream, 200, &body.to_string());
 }
@@ -4015,10 +4027,13 @@ fn serve_pmr_repeater_post(
         exclusive_rf: patched.exclusive_rf,
     };
 
+    let tetra_paused = ov.enabled && ov.exclusive_rf;
     {
         let mut state = cfg.state_write();
         state.pmr_repeater_override = Some(ov.clone());
     }
+    // Lock-free flag read by the Soapy TX loop every block — apply immediately.
+    cfg.set_pmr_holds_tetra_rf(tetra_paused);
 
     if let Err(e) = crate::net_dashboard::pmr_repeater::write_pmr_repeater_to_toml(config_path, &ov) {
         tracing::warn!("Dashboard: PMR repeater applied at runtime but failed to persist: {}", e);
@@ -4026,20 +4041,38 @@ fn serve_pmr_repeater_post(
         return;
     }
 
+    let rf_status = if !ov.enabled {
+        "disabled"
+    } else if tetra_paused {
+        "tetra_paused_awaiting_rf_modem"
+    } else {
+        "configured_awaiting_rf_modem"
+    };
+    let message = if tetra_paused {
+        "Saved. TETRA TX muted (exclusive RF). Disable PMR to resume TETRA. Analog FM modem is next."
+    } else if ov.enabled {
+        "Saved. PMR on without exclusive RF — TETRA keeps transmitting. Analog FM modem is next."
+    } else {
+        "Saved. PMR off — TETRA TX resumed."
+    };
+
     tracing::info!(
-        "Dashboard: PMR repeater updated (enabled={} mode={} tx_ch={} rx_ch={} rf=configured_awaiting_rf_modem)",
+        "Dashboard: PMR repeater updated (enabled={} mode={} tx_ch={} rx_ch={} tetra_paused={} rf={})",
         ov.enabled,
         ov.mode,
         ov.tx_channel,
-        ov.rx_channel
+        ov.rx_channel,
+        tetra_paused,
+        rf_status
     );
     http_json_response(
         stream,
         200,
         &serde_json::json!({
             "ok": true,
-            "message": "Saved. Analog FM RF modem is next — switch/config are ready.",
-            "rf_status": if ov.enabled { "configured_awaiting_rf_modem" } else { "disabled" }
+            "message": message,
+            "tetra_paused": tetra_paused,
+            "rf_status": rf_status
         })
         .to_string(),
     );

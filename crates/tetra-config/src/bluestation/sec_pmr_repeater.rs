@@ -26,7 +26,7 @@ pub struct CfgPmrRepeater {
     pub hangtime_ms: u32,
     /// Minimum duplex split enforced when `mode = "duplex"`.
     pub min_duplex_split_hz: u32,
-    /// When true, enabling PMR is intended to take exclusive RF (pause TETRA TX).
+    /// When true, enabling PMR takes exclusive RF (mute TETRA TX until PMR is off).
     pub exclusive_rf: bool,
 }
 
@@ -132,6 +132,11 @@ impl CfgPmrRepeater {
         let tx = self.resolved_tx_hz()?;
         let rx = self.resolved_rx_hz()?;
         Some(tx.abs_diff(rx))
+    }
+
+    /// Exclusive PMR is active — TETRA downlink must stay muted.
+    pub fn holds_tetra_rf(&self) -> bool {
+        self.enabled && self.exclusive_rf
     }
 }
 
@@ -280,5 +285,16 @@ mod tests {
         let cfg = apply_pmr_repeater_patch(dto).unwrap();
         assert_eq!(cfg.mode, "duplex");
         assert_eq!(cfg.split_hz(), Some(7_600_000));
+    }
+
+    #[test]
+    fn holds_tetra_rf_requires_enabled_and_exclusive() {
+        let mut cfg = CfgPmrRepeater::default();
+        assert!(!cfg.holds_tetra_rf());
+        cfg.enabled = true;
+        cfg.exclusive_rf = true;
+        assert!(cfg.holds_tetra_rf());
+        cfg.exclusive_rf = false;
+        assert!(!cfg.holds_tetra_rf());
     }
 }

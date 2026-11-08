@@ -1,4 +1,5 @@
 use serde::Deserialize;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 use tetra_core::freqs::FreqInfo;
 
@@ -321,6 +322,10 @@ pub struct SharedConfig {
     cfg: Arc<StackConfig>,
     /// Mutable state guarded with RwLock (write by the stack, read by others).
     state: Arc<RwLock<StackState>>,
+    /// Fast path for the Soapy PHY TX loop: when true, TETRA downlink is muted
+    /// because exclusive PMR (loro) holds the RF. Updated by the dashboard
+    /// without taking the state lock on every TX block.
+    pmr_holds_tetra_rf: Arc<AtomicBool>,
 }
 
 impl SharedConfig {
@@ -340,10 +345,27 @@ impl SharedConfig {
             .collect::<Vec<_>>();
         state.timeslot_alloc.configure_carriers(&carriers);
 
+        let initial_hold = state
+            .pmr_repeater_override
+            .as_ref()
+            .map(|o| o.enabled && o.exclusive_rf)
+            .unwrap_or(cfg.pmr_repeater.enabled && cfg.pmr_repeater.exclusive_rf);
+
         Self {
             cfg: Arc::new(cfg),
             state: Arc::new(RwLock::new(state)),
+            pmr_holds_tetra_rf: Arc::new(AtomicBool::new(initial_hold)),
         }
+    }
+
+    /// Whether exclusive PMR currently holds RF (TETRA TX must mute). Lock-free.
+    pub fn pmr_holds_tetra_rf(&self) -> bool {
+        self.pmr_holds_tetra_rf.load(Ordering::Relaxed)
+    }
+
+    /// Sync the lock-free hold flag from a PMR override / effective settings.
+    pub fn set_pmr_holds_tetra_rf(&self, holds: bool) {
+        self.pmr_holds_tetra_rf.store(holds, Ordering::Relaxed);
     }
 
     /// Access immutable config.

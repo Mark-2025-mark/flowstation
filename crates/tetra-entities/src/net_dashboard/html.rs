@@ -3273,7 +3273,7 @@ tbody tr:hover td{background:color-mix(in srgb,var(--bg3) 70%, transparent);}
         </div>
         <div class="card-body">
           <p class="sds-empty" style="margin:0 0 12px" data-i18n="pmr_help">UHF FM on the SXceiver (same antenna). Default parrot on PMR446 ch2: listen, then repeat on the same channel when you unkey (loro).</p>
-          <p class="sds-empty" style="margin:0 0 14px;color:var(--warn,#b45309)" data-i18n="pmr_rf_note">Switch and config are live. Analog FM RF modem is the next step — enabling saves intent; on-air FM comes with the RF path.</p>
+          <p class="sds-empty" style="margin:0 0 14px;color:var(--warn,#b45309)" data-i18n="pmr_rf_note">With exclusive RF, enabling the loro mutes TETRA TX immediately; disabling resumes TETRA. Analog FM modem is the next RF step.</p>
           <label class="sw-row">
             <span class="sw-text" data-i18n="pmr_enable">Enable PMR repeater</span>
             <span class="sw"><input type="checkbox" id="pmr-enabled"><i></i></span>
@@ -3304,7 +3304,7 @@ tbody tr:hover td{background:color-mix(in srgb,var(--bg3) 70%, transparent);}
           </div>
           <div style="margin-top:12px;font-size:13px;color:var(--muted)">
             <div><span data-i18n="pmr_resolved">Resolved</span>: TX <code id="pmr-res-tx">—</code> · RX <code id="pmr-res-rx">—</code> · split <code id="pmr-res-split">—</code></div>
-            <div style="margin-top:4px">RF: <code id="pmr-rf-status">—</code></div>
+            <div style="margin-top:4px">RF: <code id="pmr-rf-status">—</code> · TETRA: <code id="pmr-tetra-status">—</code></div>
           </div>
           <div class="config-msg" id="pmr-msg"></div>
         </div>
@@ -4379,7 +4379,7 @@ const LANGS={
   en:{
     bts_ip:'BTS IP',offline:'OFFLINE',online:'ONLINE',
     brew_online:'ONLINE',brew_offline:'OFFLINE',
-    stations:'Radios',calls:'Calls',lastheard:'Last Heard',log:'Log',rf:'RF',health:'Health',asterisk:'SIP Client',pmr:'PMR Repeater',pmr_title:'PMR Repeater',pmr_help:'UHF FM on the SXceiver (same antenna). Default parrot on PMR446 ch2: listen, then repeat on the same channel when you unkey (loro).',pmr_rf_note:'Switch/config are live. Analog FM RF modem is next — enabling saves intent; on-air FM follows the RF path.',pmr_enable:'Enable PMR repeater',pmr_mode:'Mode',pmr_tx_ch:'TX / talk channel (PMR446)',pmr_rx_ch:'RX / listen channel (PMR446)',pmr_tx_hz:'TX Hz override (0 = channel)',pmr_rx_hz:'RX Hz override (0 = channel)',pmr_ctcss:'CTCSS Hz (0 = off)',pmr_hang:'Hangtime ms',pmr_exclusive:'Exclusive RF (pause TETRA when active)',pmr_resolved:'Resolved',pmr_saved:'✓ Saved',dapnet:'DAPNET',echolink:'EchoLink',echolink_title:'EchoLink',meshcom:'MeshCom',meshcom_title:'MeshCom',geoalarm:'GeoAlarm',geoalarm_title:'GeoAlarm',config:'Config',
+    stations:'Radios',calls:'Calls',lastheard:'Last Heard',log:'Log',rf:'RF',health:'Health',asterisk:'SIP Client',pmr:'PMR Repeater',pmr_title:'PMR Repeater',pmr_help:'UHF FM on the SXceiver (same antenna). Default parrot on PMR446 ch2: listen, then repeat on the same channel when you unkey (loro).',pmr_rf_note:'With exclusive RF, enabling the loro mutes TETRA TX immediately; disabling resumes TETRA. Analog FM modem is the next RF step.',pmr_enable:'Enable PMR repeater',pmr_mode:'Mode',pmr_tx_ch:'TX / talk channel (PMR446)',pmr_rx_ch:'RX / listen channel (PMR446)',pmr_tx_hz:'TX Hz override (0 = channel)',pmr_rx_hz:'RX Hz override (0 = channel)',pmr_ctcss:'CTCSS Hz (0 = off)',pmr_hang:'Hangtime ms',pmr_exclusive:'Exclusive RF (pause TETRA when active)',pmr_resolved:'Resolved',pmr_saved:'✓ Saved',pmr_tetra_paused:'paused',pmr_tetra_active:'active',dapnet:'DAPNET',echolink:'EchoLink',echolink_title:'EchoLink',meshcom:'MeshCom',meshcom_title:'MeshCom',geoalarm:'GeoAlarm',geoalarm_title:'GeoAlarm',config:'Config',
     sdslog:'SDS Log',th_dir:'Dir',th_from:'From',th_to:'To',th_message:'Message',no_sds:'No SDS messages yet',sds_refresh:'Refresh',
     rf_freq:'Center freq',rf_rate:'Sample rate',rf_rms:'RMS',rf_peak:'Peak',rf_age:'Snapshot',
     rf_waiting:'waiting…',rf_live:'live',rf_stale:'stale',
@@ -4722,7 +4722,7 @@ const LANGS={
     cfg_sec_configuration:'Configuración',cfg_sec_access:'Control de acceso',cfg_sec_wx:'WX / METAR',whitelist_title:'Lista blanca ISSI',whitelist_add:'Añadir ISSI',whitelist_empty:'Lista vacía — red abierta (cualquier radio puede registrarse).',
     whitelist_help:'Cuando la lista está vacía, cualquier radio puede registrarse (red abierta). Con entradas, solo se aceptan los ISSI listados; el resto se rechazan. Los cambios se aplican al instante y persisten tras reiniciar.',
     asterisk:'Cliente SIP',asterisk_title:'Cliente SIP (PBX)',ast_install:'Instalar',ast_install_title:'Instalar cliente SIP',
-    pmr:'Repetidor PMR',pmr_title:'Repetidor PMR',pmr_help:'FM UHF en el SXceiver (misma antena). Por defecto loro en PMR446 ch2: escucha y, al soltar PTT, repite en el mismo canal.',pmr_rf_note:'El switch y la config ya funcionan. El módem FM de RF es el siguiente paso: al activar se guarda la intención; el aire llega con la ruta RF.',pmr_enable:'Activar repetidor PMR',pmr_mode:'Modo',pmr_tx_ch:'Canal TX / hablar (PMR446)',pmr_rx_ch:'Canal RX / escuchar (PMR446)',pmr_tx_hz:'TX Hz (0 = canal)',pmr_rx_hz:'RX Hz (0 = canal)',pmr_ctcss:'CTCSS Hz (0 = off)',pmr_hang:'Hangtime ms',pmr_exclusive:'RF exclusivo (pausar TETRA al activar)',pmr_resolved:'Resuelto',pmr_saved:'✓ Guardado',
+    pmr:'Repetidor PMR',pmr_title:'Repetidor PMR',pmr_help:'FM UHF en el SXceiver (misma antena). Por defecto loro en PMR446 ch2: escucha y, al soltar PTT, repite en el mismo canal.',pmr_rf_note:'Con RF exclusivo, al activar el loro se silencia TETRA al momento; al desactivarlo TETRA vuelve. El módem FM analógico es el siguiente paso de RF.',pmr_enable:'Activar repetidor PMR',pmr_mode:'Modo',pmr_tx_ch:'Canal TX / hablar (PMR446)',pmr_rx_ch:'Canal RX / escuchar (PMR446)',pmr_tx_hz:'TX Hz (0 = canal)',pmr_rx_hz:'RX Hz (0 = canal)',pmr_ctcss:'CTCSS Hz (0 = off)',pmr_hang:'Hangtime ms',pmr_exclusive:'RF exclusivo (pausar TETRA al activar)',pmr_resolved:'Resuelto',pmr_saved:'✓ Guardado',pmr_tetra_paused:'pausado',pmr_tetra_active:'activo',
     ast_account:'Cuenta SIP (estilo Zoiper)',ast_enable:'Activar cliente SIP (registrarse como extensión PBX)',
     ast_install_confirm:'¿Instalar el cliente SIP ahora?\n\nCompila tetra-codec y reconstruye FlowStation con soporte SIP (15–40 min en una Pi 3B+). La estación se reinicia al terminar. Las llamadas de grupo, Brew y SDS se conservan.',
     ast_saved_restart:'✓ Guardado — reiniciando para aplicar',ast_need_install:'Guardado. Pulsa Instalar para compilar el puente SIP.',
@@ -7085,12 +7085,13 @@ async function loadPmr(){
     set('pmr-res-rx',pmrFmtHz(d.resolved_rx_hz));
     set('pmr-res-split',d.split_hz?((d.split_hz/1e3).toFixed(1)+' kHz'):'—');
     set('pmr-rf-status',d.rf_status||'—');
+    set('pmr-tetra-status',d.tetra_paused?(t('pmr_tetra_paused')||'paused'):(t('pmr_tetra_active')||'active'));
     const pill=document.getElementById('pmr-hero-pill');
     const dot=document.getElementById('pmr-hero-dot');
     const sub=document.getElementById('pmr-hero-sub');
-    if(pill){pill.textContent=d.enabled?(d.rf_status||'on'):'off';pill.className='pill '+(d.enabled?'pill-warn':'pill-idle');}
+    if(pill){pill.textContent=d.enabled?(d.tetra_paused?'TETRA paused':(d.rf_status||'on')):'off';pill.className='pill '+(d.enabled?'pill-warn':'pill-idle');}
     if(dot){dot.className='hero-dot '+(d.enabled?'is-warn':'is-idle');}
-    if(sub){sub.textContent=d.enabled?('TX ch'+d.tx_channel+' · RX ch'+d.rx_channel+' · '+(d.mode||'')):'UHF · SXceiver';}
+    if(sub){sub.textContent=d.enabled?('TX ch'+d.tx_channel+' · RX ch'+d.rx_channel+' · '+(d.mode||'')+(d.tetra_paused?' · TETRA off':'')):'UHF · SXceiver';}
   }catch{setPmrMsg(t('conn_error'),false);}
 }
 async function savePmr(){
