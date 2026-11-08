@@ -33,11 +33,13 @@ const SQUELCH_OPEN_DB: f32 = 6.0;
 const SQUELCH_CLOSE_DB: f32 = 2.5;
 /// IQ blocks to observe before allowing carrier (learn ambient floor).
 const SQUELCH_WARMUP_BLOCKS: u32 = 400;
-/// Audio high-pass (~300 Hz) removes discriminator DC — that DC remodulates as a
-/// constant electrical beep under the voice.
-const AUDIO_HPF_HZ: f64 = 300.0;
+/// Audio high-pass — strips slow discriminator bias. A mid-band birdie from LO
+/// error is handled separately via AFC (mean Δφ → TX phase correction).
+const AUDIO_HPF_HZ: f64 = 500.0;
 /// Ignore RX carrier this long after replay (own TX bleed into RX).
 const POST_REPLAY_COOLDOWN: Duration = Duration::from_millis(750);
+/// Use only the first N audio samples of a take to estimate AFC (avoid voice bias).
+const AFC_ESTIMATE_AUDIO_SAMPLES: usize = (AUDIO_FS * 0.25) as usize;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Phase {
@@ -62,13 +64,17 @@ pub struct PmrParrot {
     /// Blocks seen while learning the ambient floor (no opens yet).
     squelch_warmup: u32,
     carrier: bool,
-    /// Decimation accumulator for audio.
-    audio_acc: f32,
-    audio_n: usize,
     /// 1-pole HPF state (DC block on demod audio).
     hpf_x1: f32,
     hpf_y1: f32,
     hpf_alpha: f32,
+    /// Running mean of raw (pre-HPF) audio while recording — LO/discriminator offset.
+    afc_raw_sum: f64,
+    afc_raw_n: usize,
+    /// IQ low-pass state before decimated FM demod (anti-alias).
+    iq_lp: ComplexSample,
+    iq_lp_alpha: f32,
+    iq_lp_n: usize,
     /// Recorded baseband audio at AUDIO_FS.
     recording: Vec<f32>,
     hang_deadline: Option<Instant>,
@@ -123,11 +129,14 @@ impl PmrParrot {
             noise_db: -60.0,
             squelch_warmup: 0,
             carrier: false,
-            audio_acc: 0.0,
-            audio_n: 0,
             hpf_x1: 0.0,
             hpf_y1: 0.0,
             hpf_alpha,
+            afc_raw_sum: 0.0,
+            afc_raw_n: 0,
+            iq_lp: ComplexSample::ZERO,
+            iq_lp_alpha: 2.0 / (decim as f32 + 1.0),
+            iq_lp_n: 0,
             recording: Vec::with_capacity((AUDIO_FS * 8.0) as usize),
             hang_deadline: None,
             listen_after: None,
@@ -183,10 +192,12 @@ impl PmrParrot {
                     .unwrap_or(true);
                 if self.carrier && cooled {
                     self.recording.clear();
-                    self.audio_acc = 0.0;
-                    self.audio_n = 0;
                     self.hpf_x1 = 0.0;
                     self.hpf_y1 = 0.0;
+                    self.afc_raw_sum = 0.0;
+                    self.afc_raw_n = 0;
+                    self.iq_lp = ComplexSample::ZERO;
+                    self.iq_lp_n = 0;
                     self.phase = Phase::Record;
                     tracing::info!("PMR parrot: carrier — recording");
                     self.append_audio(&audio_chunk);
@@ -205,13 +216,19 @@ impl PmrParrot {
                         self.carrier = false;
                     }
                     if self.recording.len() >= MIN_RECORD_SAMPLES {
-                        self.normalize_recording_dc();
+                        self.finalize_recording_afc();
                         self.hang_deadline = Some(Instant::now() + self.hangtime);
                         self.phase = Phase::Hang;
+                        let afc_hz = if self.afc_raw_n > 0 {
+                            (self.afc_raw_sum / self.afc_raw_n as f64) * DEVIATION_HZ
+                        } else {
+                            0.0
+                        };
                         tracing::info!(
-                            "PMR parrot: unkey — hang {} ms ({} audio samples)",
+                            "PMR parrot: unkey — hang {} ms ({} audio samples, rx_offset≈{:.0} Hz)",
                             self.hangtime.as_millis(),
-                            self.recording.len()
+                            self.recording.len(),
+                            afc_hz
                         );
                     } else {
                         tracing::debug!("PMR parrot: drop short take ({} samples)", self.recording.len());
@@ -277,28 +294,42 @@ impl PmrParrot {
     fn demod_block_n(&mut self, n: usize) -> (f32, Vec<f32>) {
         let mut mag_sum = 0.0f32;
         let mut out = Vec::with_capacity(n / self.decim + 1);
-        let scale = (self.fs / (TAU as f64) / DEVIATION_HZ) as f32;
+        // After IQ decimation, discriminator runs at ~AUDIO_FS.
+        let audio_fs = self.fs / self.decim as f64;
+        let scale = (audio_fs / (TAU as f64) / DEVIATION_HZ) as f32;
+        let a = self.iq_lp_alpha;
 
         for i in 0..n {
             let s = self.rx_scratch[i];
             mag_sum += s.norm();
-            // Quadrature discriminator: Δφ between consecutive samples.
-            let prod = s * self.prev.conj();
-            let dphi = prod.im.atan2(prod.re);
-            self.prev = s;
-            let audio = (dphi * scale).clamp(-1.5, 1.5);
-            self.audio_acc += audio;
-            self.audio_n += 1;
-            if self.audio_n >= self.decim {
-                let raw = self.audio_acc / self.audio_n as f32;
-                self.audio_acc = 0.0;
-                self.audio_n = 0;
-                // DC-block: without this, LO/discriminator bias becomes a constant beep on TX.
-                let y = self.hpf_alpha * (self.hpf_y1 + raw - self.hpf_x1);
-                self.hpf_x1 = raw;
-                self.hpf_y1 = y;
-                out.push(y.clamp(-1.0, 1.0));
+            // Anti-alias: EMA low-pass on IQ, then demod at decimated rate.
+            self.iq_lp.re += a * (s.re - self.iq_lp.re);
+            self.iq_lp.im += a * (s.im - self.iq_lp.im);
+            self.iq_lp_n += 1;
+            if self.iq_lp_n < self.decim {
+                continue;
             }
+            self.iq_lp_n = 0;
+            let s_lp = self.iq_lp;
+            let prod = s_lp * self.prev.conj();
+            let dphi = prod.im.atan2(prod.re);
+            self.prev = s_lp;
+            let raw = (dphi * scale).clamp(-1.5, 1.5);
+
+            if self.phase == Phase::Record && self.afc_raw_n < AFC_ESTIMATE_AUDIO_SAMPLES {
+                self.afc_raw_sum += f64::from(raw);
+                self.afc_raw_n += 1;
+            }
+            let afc = if self.afc_raw_n > 0 {
+                (self.afc_raw_sum / self.afc_raw_n as f64) as f32
+            } else {
+                0.0
+            };
+            let centered = raw - afc;
+            let y = self.hpf_alpha * (self.hpf_y1 + centered - self.hpf_x1);
+            self.hpf_x1 = centered;
+            self.hpf_y1 = y;
+            out.push(y.clamp(-1.0, 1.0));
         }
         let mag = mag_sum / n.max(1) as f32;
         (mag, out)
@@ -365,8 +396,8 @@ impl PmrParrot {
         self.recording.extend_from_slice(chunk);
     }
 
-    /// Extra safety: strip residual DC from the whole take before replay.
-    fn normalize_recording_dc(&mut self) {
+    /// Strip residual DC from stored audio before replay.
+    fn finalize_recording_afc(&mut self) {
         if self.recording.is_empty() {
             return;
         }
