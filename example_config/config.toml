@@ -865,16 +865,16 @@ voice_service = true
 
 ###############################################################################
 # OPTIONAL: PMR / UHF FM repeater (SXceiver 70 cm). Dashboard → PMR Repeater.
-# Default: TX = PMR446 channel 1 (talk), RX = channel 2 (listen).
-# Those channels are only 12.5 kHz apart → use mode = "simplex_relay" on one HAT.
-# Duplex needs ≥ min_duplex_split_hz (default 100 kHz) between TX and RX.
-# Analog FM RF modem is a follow-up; the switch persists config today.
+# Same antenna: mode = "simplex_relay" = listen on RX, then talk on TX (not both at once).
+# Default: TX = PMR446 ch1 (446.00625), RX = ch8 (446.09375) — widest classic split (~87.5 kHz).
+# True duplex needs ≥ min_duplex_split_hz (default 100 kHz) and usually a duplexer; PMR446
+# alone is too narrow for same-site duplex. Analog FM RF modem is a follow-up.
 
 # [pmr_repeater]
 # enabled = false
-# mode = "simplex_relay"   # or "duplex" with wide split
+# mode = "simplex_relay"   # or "duplex" with wide split (not ch1/ch8 on one antenna)
 # tx_channel = 1
-# rx_channel = 2
+# rx_channel = 8
 # tx_hz = 0                # 0 = derive from tx_channel (PMR446 table)
 # rx_hz = 0
 # ctcss_hz = 0.0

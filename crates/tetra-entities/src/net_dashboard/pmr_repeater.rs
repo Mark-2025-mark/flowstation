@@ -85,7 +85,7 @@ mod tests {
             enabled: true,
             mode: "simplex_relay".into(),
             tx_channel: 1,
-            rx_channel: 2,
+            rx_channel: 8,
             tx_hz: 0,
             rx_hz: 0,
             ctcss_hz: 0.0,

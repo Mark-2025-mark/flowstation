@@ -3,10 +3,10 @@ use toml::Value;
 
 /// Analog PMR / UHF FM repeater settings (SXceiver 70 cm window).
 ///
-/// Default mapping matches the user's request: **TX = PMR446 channel 1**,
-/// **RX = PMR446 channel 2**. Those two are only 12.5 kHz apart, so simultaneous
-/// full-duplex on one SXceiver will desense; `simplex_relay` is the safe default
-/// (receive a transmission, then re-transmit on the talk channel).
+/// Default mapping: **TX = PMR446 channel 1** (talk / output),
+/// **RX = PMR446 channel 8** (listen / input) — widest classic 8-channel split
+/// (~87.5 kHz). Still too tight for true duplex on one antenna; `simplex_relay`
+/// is the safe default (receive on RX, then re-transmit on TX when the input drops).
 #[derive(Debug, Clone)]
 pub struct CfgPmrRepeater {
     pub enabled: bool,
@@ -89,7 +89,7 @@ fn default_tx_channel() -> u8 {
     1
 }
 fn default_rx_channel() -> u8 {
-    2
+    8
 }
 fn default_hangtime_ms() -> u32 {
     1000
@@ -212,14 +212,15 @@ mod tests {
     }
 
     #[test]
-    fn default_is_simplex_ch1_tx_ch2_rx() {
+    fn default_is_simplex_ch1_tx_ch8_rx() {
         let cfg = CfgPmrRepeater::default();
         assert!(!cfg.enabled);
         assert_eq!(cfg.mode, "simplex_relay");
         assert_eq!(cfg.tx_channel, 1);
-        assert_eq!(cfg.rx_channel, 2);
+        assert_eq!(cfg.rx_channel, 8);
         assert_eq!(cfg.resolved_tx_hz(), Some(446_006_250));
-        assert_eq!(cfg.resolved_rx_hz(), Some(446_018_750));
+        assert_eq!(cfg.resolved_rx_hz(), Some(446_093_750));
+        assert_eq!(cfg.split_hz(), Some(87_500));
     }
 
     #[test]
