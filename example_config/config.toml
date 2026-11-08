@@ -865,17 +865,17 @@ voice_service = true
 
 ###############################################################################
 # OPTIONAL: PMR / UHF FM repeater (SXceiver 70 cm). Dashboard → PMR Repeater.
-# Same antenna: mode = "simplex_relay" = listen on RX, then talk on TX (not both at once).
-# Default: TX = PMR446 ch1 (446.00625), RX = ch8 (446.09375) — widest classic split (~87.5 kHz).
-# True duplex needs ≥ min_duplex_split_hz (default 100 kHz) and usually a duplexer; PMR446
-# alone is too narrow for same-site duplex. Analog FM RF modem is a follow-up.
+# Same antenna, time-separated RX then TX (never both at once).
+# Default parrot on PMR446 ch2: listen, then re-TX the recording on the same channel (loro).
+# Also: mode = "simplex_relay" with different RX/TX channels, or "duplex" with ≥100 kHz split.
+# Analog FM RF modem is a follow-up; the switch persists config today.
 
 # [pmr_repeater]
 # enabled = false
-# mode = "simplex_relay"   # or "duplex" with wide split (not ch1/ch8 on one antenna)
-# tx_channel = 1
-# rx_channel = 8
-# tx_hz = 0                # 0 = derive from tx_channel (PMR446 table)
+# mode = "parrot"          # or "simplex_relay" / "duplex"
+# tx_channel = 2
+# rx_channel = 2           # same as tx for parrot
+# tx_hz = 0                # 0 = derive from channel (PMR446 table)
 # rx_hz = 0
 # ctcss_hz = 0.0
 # hangtime_ms = 1000

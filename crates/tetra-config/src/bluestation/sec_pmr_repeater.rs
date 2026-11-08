@@ -3,15 +3,15 @@ use toml::Value;
 
 /// Analog PMR / UHF FM repeater settings (SXceiver 70 cm window).
 ///
-/// Default mapping: **TX = PMR446 channel 1** (talk / output),
-/// **RX = PMR446 channel 8** (listen / input) — widest classic 8-channel split
-/// (~87.5 kHz). Still too tight for true duplex on one antenna; `simplex_relay`
-/// is the safe default (receive on RX, then re-transmit on TX when the input drops).
+/// Default: **parrot on PMR446 channel 2** — listen on ch2, when the carrier
+/// drops re-transmit the recording on the **same** channel (store-and-forward
+/// “loro”). Same antenna, time-separated RX then TX. Also supports
+/// `simplex_relay` with different RX/TX channels, and `duplex` with a wide split.
 #[derive(Debug, Clone)]
 pub struct CfgPmrRepeater {
     pub enabled: bool,
-    /// `simplex_relay` (safe for adjacent PMR446 channels) or `duplex`
-    /// (requires `|tx-rx| >= min_duplex_split_hz`).
+    /// `parrot` (same channel store-and-forward), `simplex_relay` (RX then TX,
+    /// channels may differ), or `duplex` (requires `|tx-rx| >= min_duplex_split_hz`).
     pub mode: String,
     /// PMR446 channel number 1..=16 used for TX ("talk"), when `tx_hz` is 0.
     pub tx_channel: u8,
@@ -83,13 +83,13 @@ impl Default for CfgPmrRepeaterDto {
 }
 
 fn default_mode() -> String {
-    "simplex_relay".to_string()
+    "parrot".to_string()
 }
 fn default_tx_channel() -> u8 {
-    1
+    2
 }
 fn default_rx_channel() -> u8 {
-    8
+    2
 }
 fn default_hangtime_ms() -> u32 {
     1000
@@ -144,8 +144,10 @@ pub fn apply_pmr_repeater_patch(src: CfgPmrRepeaterDto) -> Result<CfgPmrRepeater
     }
 
     let mode = src.mode.trim().to_ascii_lowercase();
-    if mode != "simplex_relay" && mode != "duplex" {
-        return Err("pmr_repeater: mode must be \"simplex_relay\" or \"duplex\"".to_string());
+    if mode != "parrot" && mode != "simplex_relay" && mode != "duplex" {
+        return Err(
+            "pmr_repeater: mode must be \"parrot\", \"simplex_relay\" or \"duplex\"".to_string(),
+        );
     }
 
     if src.tx_hz == 0 && !(1..=16).contains(&src.tx_channel) {
@@ -174,9 +176,6 @@ pub fn apply_pmr_repeater_patch(src: CfgPmrRepeaterDto) -> Result<CfgPmrRepeater
     let Some(rx) = cfg.resolved_rx_hz() else {
         return Err("pmr_repeater: could not resolve RX frequency".to_string());
     };
-    if tx == rx {
-        return Err("pmr_repeater: TX and RX frequencies must differ".to_string());
-    }
     // SXceiver useful window is UHF (~360–550 MHz); keep a soft guard.
     for (name, hz) in [("tx", tx), ("rx", rx)] {
         if !(360_000_000..=550_000_000).contains(&hz) {
@@ -187,12 +186,26 @@ pub fn apply_pmr_repeater_patch(src: CfgPmrRepeaterDto) -> Result<CfgPmrRepeater
     }
 
     let split = tx.abs_diff(rx);
-    if cfg.mode == "duplex" && split < cfg.min_duplex_split_hz {
-        return Err(format!(
-            "pmr_repeater: duplex needs ≥{} Hz split (got {} Hz). \
-             PMR446 ch1/ch2 are adjacent — use mode = \"simplex_relay\"",
-            cfg.min_duplex_split_hz, split
-        ));
+    if cfg.mode == "parrot" && split != 0 {
+        return Err(
+            "pmr_repeater: parrot mode needs the same TX and RX channel/frequency (store-and-forward on one channel)"
+                .to_string(),
+        );
+    }
+    if cfg.mode == "duplex" {
+        if split == 0 {
+            return Err(
+                "pmr_repeater: duplex needs different TX/RX — use mode = \"parrot\" for same-channel loro"
+                    .to_string(),
+            );
+        }
+        if split < cfg.min_duplex_split_hz {
+            return Err(format!(
+                "pmr_repeater: duplex needs ≥{} Hz split (got {} Hz). \
+                 Use mode = \"parrot\" (same channel) or \"simplex_relay\"",
+                cfg.min_duplex_split_hz, split
+            ));
+        }
     }
 
     Ok(cfg)
@@ -212,15 +225,40 @@ mod tests {
     }
 
     #[test]
-    fn default_is_simplex_ch1_tx_ch8_rx() {
+    fn default_is_parrot_ch2() {
         let cfg = CfgPmrRepeater::default();
         assert!(!cfg.enabled);
-        assert_eq!(cfg.mode, "simplex_relay");
-        assert_eq!(cfg.tx_channel, 1);
-        assert_eq!(cfg.rx_channel, 8);
-        assert_eq!(cfg.resolved_tx_hz(), Some(446_006_250));
-        assert_eq!(cfg.resolved_rx_hz(), Some(446_093_750));
-        assert_eq!(cfg.split_hz(), Some(87_500));
+        assert_eq!(cfg.mode, "parrot");
+        assert_eq!(cfg.tx_channel, 2);
+        assert_eq!(cfg.rx_channel, 2);
+        assert_eq!(cfg.resolved_tx_hz(), Some(446_018_750));
+        assert_eq!(cfg.resolved_rx_hz(), Some(446_018_750));
+        assert_eq!(cfg.split_hz(), Some(0));
+    }
+
+    #[test]
+    fn parrot_rejects_different_channels() {
+        let mut dto = CfgPmrRepeaterDto::default();
+        dto.mode = "parrot".into();
+        dto.tx_channel = 1;
+        dto.rx_channel = 2;
+        let err = apply_pmr_repeater_patch(dto).unwrap_err();
+        assert!(err.contains("parrot"));
+    }
+
+    #[test]
+    fn simplex_relay_allows_same_or_split() {
+        let mut same = CfgPmrRepeaterDto::default();
+        same.mode = "simplex_relay".into();
+        same.tx_channel = 2;
+        same.rx_channel = 2;
+        assert!(apply_pmr_repeater_patch(same).is_ok());
+
+        let mut split = CfgPmrRepeaterDto::default();
+        split.mode = "simplex_relay".into();
+        split.tx_channel = 1;
+        split.rx_channel = 8;
+        assert!(apply_pmr_repeater_patch(split).is_ok());
     }
 
     #[test]
@@ -230,7 +268,7 @@ mod tests {
         dto.tx_channel = 1;
         dto.rx_channel = 2;
         let err = apply_pmr_repeater_patch(dto).unwrap_err();
-        assert!(err.contains("simplex_relay") || err.contains("split"));
+        assert!(err.contains("split") || err.contains("parrot"));
     }
 
     #[test]

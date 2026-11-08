@@ -3936,7 +3936,7 @@ fn serve_pmr_repeater_get(stream: TcpStream, shared_config: &Option<tetra_config
         "duplex_ok": duplex_ok,
         // Config/UI is live; analog FM modem on the SXceiver is the next RF step.
         "rf_status": if pmr.enabled { "configured_awaiting_rf_modem" } else { "disabled" },
-        "note": "Same antenna: simplex_relay = RX then TX. Default ch1 talk / ch8 listen (~87.5 kHz). Duplex needs ≥100 kHz and is not practical on PMR446 alone."
+        "note": "Parrot = same channel store-and-forward (loro). Simplex_relay = RX then TX (channels may differ). Duplex needs ≥100 kHz split."
     });
     http_json_response(stream, 200, &body.to_string());
 }

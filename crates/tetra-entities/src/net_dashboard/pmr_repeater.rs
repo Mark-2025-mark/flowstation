@@ -83,9 +83,9 @@ mod tests {
         std::fs::write(&path, cfg).unwrap();
         let ov = PmrRepeaterRuntimeOverride {
             enabled: true,
-            mode: "simplex_relay".into(),
-            tx_channel: 1,
-            rx_channel: 8,
+            mode: "parrot".into(),
+            tx_channel: 2,
+            rx_channel: 2,
             tx_hz: 0,
             rx_hz: 0,
             ctcss_hz: 0.0,
