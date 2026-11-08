@@ -41,13 +41,21 @@ const SQUELCH_OPEN_DB: f32 = 6.0;
 const SQUELCH_CLOSE_DB: f32 = 2.5;
 /// IQ blocks to observe before allowing carrier (learn ambient floor).
 const SQUELCH_WARMUP_BLOCKS: u32 = 400;
-/// Audio high-pass — strips slow discriminator bias. A mid-band birdie from LO
-/// error is handled separately via AFC (mean Δφ → TX phase correction).
+/// Audio high-pass — strips slow discriminator bias / rumble.
 const AUDIO_HPF_HZ: f64 = 500.0;
 /// Ignore RX carrier this long after replay (own TX bleed into RX).
 const POST_REPLAY_COOLDOWN: Duration = Duration::from_millis(750);
 /// Use only the first N audio samples of a take to estimate AFC (avoid voice bias).
 const AFC_ESTIMATE_AUDIO_SAMPLES: usize = (AUDIO_FS * 0.25) as usize;
+/// IQ DC tracker time-constant (Hz). Kills LO leakage birdies before FM demod.
+const IQ_DC_HZ: f64 = 30.0;
+/// Search band for the constant on-air birdie (user capture ≈ 623 Hz).
+const BIRDIE_SEARCH_LO_HZ: f64 = 350.0;
+const BIRDIE_SEARCH_HI_HZ: f64 = 1_200.0;
+/// Notch Q — narrow enough to spare voice formants.
+const BIRDIE_NOTCH_Q: f64 = 12.0;
+/// Require birdie peak this much above band median before notching.
+const BIRDIE_PEAK_RATIO: f64 = 4.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Phase {
@@ -81,6 +89,9 @@ pub struct PmrParrot {
     /// Running mean of raw (pre-HPF) audio while recording — LO/discriminator offset.
     afc_raw_sum: f64,
     afc_raw_n: usize,
+    /// Slow IQ DC estimate (LO leakage) removed before demod.
+    iq_dc: ComplexSample,
+    iq_dc_alpha: f32,
     /// IQ low-pass state before decimated FM demod (anti-alias).
     iq_lp: ComplexSample,
     iq_lp_alpha: f32,
@@ -126,15 +137,18 @@ impl PmrParrot {
         let rc = 1.0 / (TAU as f64 * AUDIO_HPF_HZ);
         let dt = 1.0 / audio_fs;
         let hpf_alpha = (rc / (rc + dt)) as f32;
+        // 1-pole EMA ≈ low-pass at IQ_DC_HZ on the IQ stream.
+        let iq_dc_alpha = (TAU as f64 * IQ_DC_HZ / fs).clamp(1.0e-6, 0.05) as f32;
         tracing::info!(
-            "PMR parrot: fs={:.0} Hz audio≈{:.0} Hz (decim={}) hang={}ms ctcss={:.1} block={} hpf={:.0}Hz",
+            "PMR parrot: fs={:.0} Hz audio≈{:.0} Hz (decim={}) hang={}ms ctcss={:.1} block={} hpf={:.0}Hz iq_dc={:.0}Hz",
             fs,
             audio_fs,
             decim,
             hangtime.as_millis(),
             cfg.ctcss_hz,
             block_len,
-            AUDIO_HPF_HZ
+            AUDIO_HPF_HZ,
+            IQ_DC_HZ
         );
         Self {
             fs,
@@ -152,6 +166,8 @@ impl PmrParrot {
             hpf_alpha,
             afc_raw_sum: 0.0,
             afc_raw_n: 0,
+            iq_dc: ComplexSample::ZERO,
+            iq_dc_alpha,
             iq_lp: ComplexSample::ZERO,
             iq_lp_alpha: 2.0 / (decim as f32 + 1.0),
             iq_lp_n: 0,
@@ -233,6 +249,7 @@ impl PmrParrot {
                     self.hpf_y1 = 0.0;
                     self.afc_raw_sum = 0.0;
                     self.afc_raw_n = 0;
+                    self.iq_dc = ComplexSample::ZERO;
                     self.iq_lp = ComplexSample::ZERO;
                     self.iq_lp_n = 0;
                     self.play_timeout_beep = false;
@@ -378,8 +395,13 @@ impl PmrParrot {
         let a = self.iq_lp_alpha;
 
         for i in 0..n {
-            let s = self.rx_scratch[i];
+            let mut s = self.rx_scratch[i];
             mag_sum += s.norm();
+            // Strip LO/IQ DC leakage (common source of a fixed mid-band birdie).
+            self.iq_dc.re += self.iq_dc_alpha * (s.re - self.iq_dc.re);
+            self.iq_dc.im += self.iq_dc_alpha * (s.im - self.iq_dc.im);
+            s.re -= self.iq_dc.re;
+            s.im -= self.iq_dc.im;
             // Anti-alias: EMA low-pass on IQ, then demod at decimated rate.
             self.iq_lp.re += a * (s.re - self.iq_lp.re);
             self.iq_lp.im += a * (s.im - self.iq_lp.im);
@@ -474,17 +496,20 @@ impl PmrParrot {
         self.recording.extend_from_slice(chunk);
     }
 
-    /// Strip residual DC from stored audio before replay.
+    /// Strip residual DC and any strong constant birdie before replay.
     fn finalize_recording_afc(&mut self) {
         if self.recording.is_empty() {
             return;
         }
         let mean = self.recording.iter().sum::<f32>() / self.recording.len() as f32;
-        if mean.abs() < 1e-6 {
-            return;
+        if mean.abs() >= 1e-6 {
+            for s in &mut self.recording {
+                *s = (*s - mean).clamp(-1.0, 1.0);
+            }
         }
-        for s in &mut self.recording {
-            *s = (*s - mean).clamp(-1.0, 1.0);
+        if let Some(hz) = find_birdie_hz(&self.recording, self.fs / self.decim as f64) {
+            tracing::warn!("PMR parrot: notching constant birdie ≈ {:.0} Hz before replay", hz);
+            notch_inplace(&mut self.recording, self.fs / self.decim as f64, hz, BIRDIE_NOTCH_Q);
         }
     }
 
@@ -568,6 +593,136 @@ fn tx_schedule_count(sdr: &SoapyIo, block_len: usize) -> Result<SampleCount, RxT
     Ok(now + block_len as SampleCount * 4)
 }
 
+/// Autocorr + Goertzel confirm for a stable mid-band birdie (user capture ≈ 623 Hz).
+fn find_birdie_hz(audio: &[f32], audio_fs: f64) -> Option<f64> {
+    if audio.len() < 128 || !(audio_fs.is_finite() && audio_fs > 0.0) {
+        return None;
+    }
+    // Prefer early audio (tone is already present; less vowel bias than mid-take).
+    let n = audio.len().min((audio_fs * 0.6) as usize).max(128);
+    let slice = &audio[..n];
+    let lo = BIRDIE_SEARCH_LO_HZ;
+    let hi = BIRDIE_SEARCH_HI_HZ.min(audio_fs * 0.45);
+    if hi <= lo + 20.0 {
+        return None;
+    }
+
+    // Remove DC for a cleaner autocorr peak.
+    let mean = slice.iter().map(|x| f64::from(*x)).sum::<f64>() / n as f64;
+    let centered: Vec<f64> = slice.iter().map(|x| f64::from(*x) - mean).collect();
+    let energy = centered.iter().map(|x| x * x).sum::<f64>() / n as f64;
+    if energy < 1e-8 {
+        return None;
+    }
+
+    let lag_lo = ((audio_fs / hi).floor() as usize).max(2);
+    let lag_hi = ((audio_fs / lo).ceil() as usize).min(n / 3);
+    if lag_hi <= lag_lo {
+        return None;
+    }
+
+    let mut best_lag = lag_lo;
+    let mut best_c = f64::NEG_INFINITY;
+    for lag in lag_lo..=lag_hi {
+        let mut c = 0.0;
+        let mut i = 0;
+        while i + lag < n {
+            c += centered[i] * centered[i + lag];
+            i += 1;
+        }
+        c /= (n - lag) as f64;
+        if c > best_c {
+            best_c = c;
+            best_lag = lag;
+        }
+    }
+    // Require a meaningful periodic component (vs broadband voice/noise).
+    if best_c < energy * 0.12 {
+        return None;
+    }
+    let f_ac = audio_fs / best_lag as f64;
+
+    // Refine with Goertzel around the autocorr estimate; demand a clear spectral peak.
+    let step = 2.0;
+    let mut best_f = f_ac;
+    let mut best_p = 0.0f64;
+    let mut powers = Vec::new();
+    let mut f = (f_ac - 40.0).max(lo);
+    let f_end = (f_ac + 40.0).min(hi);
+    while f <= f_end {
+        let p = goertzel_power(slice, audio_fs, f);
+        powers.push(p);
+        if p > best_p {
+            best_p = p;
+            best_f = f;
+        }
+        f += step;
+    }
+    // Band median as reference (wider search).
+    let mut band_powers = Vec::new();
+    let mut f = lo;
+    while f <= hi {
+        band_powers.push(goertzel_power(slice, audio_fs, f));
+        f += 10.0;
+    }
+    band_powers.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let median = band_powers[band_powers.len() / 2];
+    if median <= 1e-18 || best_p < BIRDIE_PEAK_RATIO * median {
+        return None;
+    }
+    Some(best_f)
+}
+
+fn goertzel_power(x: &[f32], fs: f64, freq: f64) -> f64 {
+    let w = TAU as f64 * freq / fs;
+    let coeff = 2.0 * w.cos();
+    let mut s1 = 0.0;
+    let mut s2 = 0.0;
+    for &sample in x {
+        let s0 = f64::from(sample) + coeff * s1 - s2;
+        s2 = s1;
+        s1 = s0;
+    }
+    // Standard Goertzel power (avoids unused-assignment on the last s0).
+    s1 * s1 + s2 * s2 - s1 * s2 * coeff
+}
+
+/// In-place biquad notch (RBJ cookbook).
+fn notch_inplace(audio: &mut [f32], audio_fs: f64, freq: f64, q: f64) {
+    if audio.is_empty() || !(audio_fs.is_finite() && audio_fs > 0.0) {
+        return;
+    }
+    let f0 = freq.clamp(50.0, audio_fs * 0.45);
+    let q = q.clamp(1.0, 50.0);
+    let w0 = TAU as f64 * f0 / audio_fs;
+    let alpha = w0.sin() / (2.0 * q);
+    let cos_w0 = w0.cos();
+    let b0 = 1.0;
+    let b1 = -2.0 * cos_w0;
+    let b2 = 1.0;
+    let a0 = 1.0 + alpha;
+    let a1 = -2.0 * cos_w0;
+    let a2 = 1.0 - alpha;
+    let b0a = b0 / a0;
+    let b1a = b1 / a0;
+    let b2a = b2 / a0;
+    let a1a = a1 / a0;
+    let a2a = a2 / a0;
+    let mut x1 = 0.0f64;
+    let mut x2 = 0.0f64;
+    let mut y1 = 0.0f64;
+    let mut y2 = 0.0f64;
+    for s in audio.iter_mut() {
+        let x0 = f64::from(*s);
+        let y0 = b0a * x0 + b1a * x1 + b2a * x2 - a1a * y1 - a2a * y2;
+        x2 = x1;
+        x1 = x0;
+        y2 = y1;
+        y1 = y0;
+        *s = (y0 as f32).clamp(-1.0, 1.0);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -602,5 +757,32 @@ mod tests {
         // Energy should be present in the demodulated audio.
         let energy: f32 = audio.iter().map(|x| x * x).sum::<f32>() / audio.len() as f32;
         assert!(energy > 0.01, "energy={energy}");
+    }
+
+    #[test]
+    fn finds_and_notches_constant_birdie() {
+        let fs = 12_500.0;
+        let n = (fs * 0.5) as usize;
+        let birdie = 623.0;
+        let mut audio: Vec<f32> = (0..n)
+            .map(|i| {
+                let t = i as f64 / fs;
+                // Constant birdie + quieter voice-ish tone.
+                (0.55 * (TAU as f64 * birdie * t).sin() + 0.15 * (TAU as f64 * 900.0 * t).sin())
+                    as f32
+            })
+            .collect();
+        let found = find_birdie_hz(&audio, fs).expect("birdie");
+        assert!(
+            (found - birdie).abs() < 10.0,
+            "found={found} expected≈{birdie}"
+        );
+        let before = goertzel_power(&audio, fs, birdie);
+        notch_inplace(&mut audio, fs, found, BIRDIE_NOTCH_Q);
+        let after = goertzel_power(&audio, fs, birdie);
+        assert!(
+            after < before * 0.15,
+            "before={before} after={after} — notch should crush birdie"
+        );
     }
 }
