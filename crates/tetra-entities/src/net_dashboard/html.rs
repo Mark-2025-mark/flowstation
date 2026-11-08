@@ -2291,6 +2291,10 @@ tbody tr:hover td{background:color-mix(in srgb,var(--bg3) 70%, transparent);}
       <span class="nav-icon" data-icon="asterisk"></span>
       <span class="nav-label" data-i18n="asterisk">SIP Client</span>
     </div>
+    <div class="nav-item" onclick="showPage('pmr',this)" id="nav-pmr">
+      <span class="nav-icon" data-icon="rf"></span>
+      <span class="nav-label" data-i18n="pmr">PMR Repeater</span>
+    </div>
     <div class="nav-item" onclick="showPage('dapnet',this)" id="nav-dapnet">
       <span class="nav-icon" data-icon="dapnet"></span>
       <span class="nav-label" data-i18n="dapnet">DAPNET</span>
@@ -3242,6 +3246,67 @@ tbody tr:hover td{background:color-mix(in srgb,var(--bg3) 70%, transparent);}
             </div>
           </div>
           <div class="config-msg" id="snom-msg"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── PMR / UHF FM repeater ── -->
+    <div class="page" id="page-pmr">
+      <div class="section-label" data-i18n="integrations">Integrations</div>
+      <div class="hero">
+        <span class="hero-dot is-idle" id="pmr-hero-dot"></span>
+        <div class="hero-main">
+          <div class="hero-title" data-i18n="pmr_title">PMR Repeater</div>
+          <div class="hero-sub" id="pmr-hero-sub">UHF · SXceiver</div>
+        </div>
+        <div class="hero-metrics">
+          <span class="pill pill-idle" id="pmr-hero-pill">—</span>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-head">
+          <div class="card-title" data-i18n="pmr_title">PMR Repeater</div>
+          <div class="card-actions">
+            <button class="btn btn-sm" onclick="loadPmr()"><span class="btn-icon" data-icon="restart"></span><span data-i18n="refresh">Refresh</span></button>
+            <button class="btn btn-primary" onclick="savePmr()"><span class="btn-icon" data-icon="save"></span><span data-i18n="save">Save</span></button>
+          </div>
+        </div>
+        <div class="card-body">
+          <p class="sds-empty" style="margin:0 0 12px" data-i18n="pmr_help">UHF FM on the SXceiver (same antenna). Default parrot on PMR446 ch2: listen, then repeat on the same channel when you unkey (loro).</p>
+          <p class="sds-empty" style="margin:0 0 14px;color:var(--warn,#b45309)" data-i18n="pmr_rf_note">With exclusive RF, enabling the loro mutes TETRA TX immediately; disabling resumes TETRA. Analog FM modem is the next RF step.</p>
+          <label class="sw-row">
+            <span class="sw-text" data-i18n="pmr_enable">Enable PMR repeater</span>
+            <span class="sw"><input type="checkbox" id="pmr-enabled"><i></i></span>
+          </label>
+          <div class="premium-form" style="margin-top:12px">
+            <label class="h-flabel" data-i18n="pmr_mode">Mode</label>
+            <select id="pmr-mode" class="form-input">
+              <option value="parrot">parrot (same channel — loro)</option>
+              <option value="simplex_relay">simplex_relay (RX then TX, channels may differ)</option>
+              <option value="duplex">duplex (≥100 kHz split)</option>
+            </select>
+            <label class="h-flabel" data-i18n="pmr_tx_ch">TX / talk channel (PMR446)</label>
+            <input type="number" id="pmr-tx-ch" class="form-input" min="1" max="16" value="2">
+            <label class="h-flabel" data-i18n="pmr_rx_ch">RX / listen channel (PMR446)</label>
+            <input type="number" id="pmr-rx-ch" class="form-input" min="1" max="16" value="2">
+            <label class="h-flabel" data-i18n="pmr_tx_hz">TX Hz override (0 = use channel)</label>
+            <input type="number" id="pmr-tx-hz" class="form-input" min="0" value="0">
+            <label class="h-flabel" data-i18n="pmr_rx_hz">RX Hz override (0 = use channel)</label>
+            <input type="number" id="pmr-rx-hz" class="form-input" min="0" value="0">
+            <label class="h-flabel" data-i18n="pmr_ctcss">CTCSS Hz (0 = off)</label>
+            <input type="number" id="pmr-ctcss" class="form-input" min="0" step="0.1" value="0">
+            <label class="h-flabel" data-i18n="pmr_hang">Hangtime ms</label>
+            <input type="number" id="pmr-hang" class="form-input" min="0" value="1000">
+            <label class="sw-row" style="margin-top:8px">
+              <span class="sw-text" data-i18n="pmr_exclusive">Exclusive RF (pause TETRA when active)</span>
+              <span class="sw"><input type="checkbox" id="pmr-exclusive" checked><i></i></span>
+            </label>
+          </div>
+          <div style="margin-top:12px;font-size:13px;color:var(--muted)">
+            <div><span data-i18n="pmr_resolved">Resolved</span>: TX <code id="pmr-res-tx">—</code> · RX <code id="pmr-res-rx">—</code> · split <code id="pmr-res-split">—</code></div>
+            <div style="margin-top:4px">RF: <code id="pmr-rf-status">—</code> · TETRA: <code id="pmr-tetra-status">—</code></div>
+          </div>
+          <div class="config-msg" id="pmr-msg"></div>
         </div>
       </div>
     </div>
@@ -4314,7 +4379,7 @@ const LANGS={
   en:{
     bts_ip:'BTS IP',offline:'OFFLINE',online:'ONLINE',
     brew_online:'ONLINE',brew_offline:'OFFLINE',
-    stations:'Radios',calls:'Calls',lastheard:'Last Heard',log:'Log',rf:'RF',health:'Health',asterisk:'SIP Client',dapnet:'DAPNET',echolink:'EchoLink',echolink_title:'EchoLink',meshcom:'MeshCom',meshcom_title:'MeshCom',geoalarm:'GeoAlarm',geoalarm_title:'GeoAlarm',config:'Config',
+    stations:'Radios',calls:'Calls',lastheard:'Last Heard',log:'Log',rf:'RF',health:'Health',asterisk:'SIP Client',pmr:'PMR Repeater',pmr_title:'PMR Repeater',pmr_help:'UHF FM on the SXceiver (same antenna). Default parrot on PMR446 ch2: listen, then repeat on the same channel when you unkey (loro).',pmr_rf_note:'With exclusive RF, enabling the loro mutes TETRA TX immediately; disabling resumes TETRA. Analog FM modem is the next RF step.',pmr_enable:'Enable PMR repeater',pmr_mode:'Mode',pmr_tx_ch:'TX / talk channel (PMR446)',pmr_rx_ch:'RX / listen channel (PMR446)',pmr_tx_hz:'TX Hz override (0 = channel)',pmr_rx_hz:'RX Hz override (0 = channel)',pmr_ctcss:'CTCSS Hz (0 = off)',pmr_hang:'Hangtime ms',pmr_exclusive:'Exclusive RF (pause TETRA when active)',pmr_resolved:'Resolved',pmr_saved:'✓ Saved',pmr_tetra_paused:'paused',pmr_tetra_active:'active',dapnet:'DAPNET',echolink:'EchoLink',echolink_title:'EchoLink',meshcom:'MeshCom',meshcom_title:'MeshCom',geoalarm:'GeoAlarm',geoalarm_title:'GeoAlarm',config:'Config',
     sdslog:'SDS Log',th_dir:'Dir',th_from:'From',th_to:'To',th_message:'Message',no_sds:'No SDS messages yet',sds_refresh:'Refresh',
     rf_freq:'Center freq',rf_rate:'Sample rate',rf_rms:'RMS',rf_peak:'Peak',rf_age:'Snapshot',
     rf_waiting:'waiting…',rf_live:'live',rf_stale:'stale',
@@ -4657,6 +4722,7 @@ const LANGS={
     cfg_sec_configuration:'Configuración',cfg_sec_access:'Control de acceso',cfg_sec_wx:'WX / METAR',whitelist_title:'Lista blanca ISSI',whitelist_add:'Añadir ISSI',whitelist_empty:'Lista vacía — red abierta (cualquier radio puede registrarse).',
     whitelist_help:'Cuando la lista está vacía, cualquier radio puede registrarse (red abierta). Con entradas, solo se aceptan los ISSI listados; el resto se rechazan. Los cambios se aplican al instante y persisten tras reiniciar.',
     asterisk:'Cliente SIP',asterisk_title:'Cliente SIP (PBX)',ast_install:'Instalar',ast_install_title:'Instalar cliente SIP',
+    pmr:'Repetidor PMR',pmr_title:'Repetidor PMR',pmr_help:'FM UHF en el SXceiver (misma antena). Por defecto loro en PMR446 ch2: escucha y, al soltar PTT, repite en el mismo canal.',pmr_rf_note:'Con RF exclusivo, al activar el loro se silencia TETRA al momento; al desactivarlo TETRA vuelve. El módem FM analógico es el siguiente paso de RF.',pmr_enable:'Activar repetidor PMR',pmr_mode:'Modo',pmr_tx_ch:'Canal TX / hablar (PMR446)',pmr_rx_ch:'Canal RX / escuchar (PMR446)',pmr_tx_hz:'TX Hz (0 = canal)',pmr_rx_hz:'RX Hz (0 = canal)',pmr_ctcss:'CTCSS Hz (0 = off)',pmr_hang:'Hangtime ms',pmr_exclusive:'RF exclusivo (pausar TETRA al activar)',pmr_resolved:'Resuelto',pmr_saved:'✓ Guardado',pmr_tetra_paused:'pausado',pmr_tetra_active:'activo',
     ast_account:'Cuenta SIP (estilo Zoiper)',ast_enable:'Activar cliente SIP (registrarse como extensión PBX)',
     ast_install_confirm:'¿Instalar el cliente SIP ahora?\n\nCompila tetra-codec y reconstruye FlowStation con soporte SIP (15–40 min en una Pi 3B+). La estación se reinicia al terminar. Las llamadas de grupo, Brew y SDS se conservan.',
     ast_saved_restart:'✓ Guardado — reiniciando para aplicar',ast_need_install:'Guardado. Pulsa Instalar para compilar el puente SIP.',
@@ -4952,6 +5018,7 @@ function showPage(name,el){
   if(name==='sdslog'){loadSdsLog();}
   if(name==='health'){loadHealthIntegrations();}
   if(name==='asterisk'){loadAsteriskStatus();loadSnomNotify();}
+  if(name==='pmr'){loadPmr();}
   if(name==='dapnet'){loadDapnet();loadDapnetLog();}
   if(name==='geoalarm'){loadGeoalarm();}
   if(name==='config'){loadConfig();loadWhitelist();loadWx();}
@@ -6995,6 +7062,59 @@ async function saveWx(){
   }catch{setWxMsg(t('conn_error'),false);}
 }
 function setWxMsg(txt,ok){const el=document.getElementById('wx-msg');el.textContent=txt;el.style.color=ok?'var(--accent)':'var(--danger)';setTimeout(()=>{if(el.textContent===txt)el.textContent='';},4000);}
+
+// ── PMR / UHF FM repeater ───────────────────────────────────────────────────
+function setPmrMsg(txt,ok){const el=document.getElementById('pmr-msg');if(!el)return;el.textContent=txt;el.style.color=ok?'var(--accent)':'var(--danger)';setTimeout(()=>{if(el.textContent===txt)el.textContent='';},5000);}
+function pmrFmtHz(hz){if(!hz)return '—';return (hz/1e6).toFixed(5)+' MHz';}
+async function loadPmr(){
+  try{
+    const r=await fetch('/api/pmr-repeater');
+    if(!r.ok){setPmrMsg(t('conn_error'),false);return;}
+    const d=await r.json();
+    const en=document.getElementById('pmr-enabled'); if(en) en.checked=!!d.enabled;
+    const mode=document.getElementById('pmr-mode'); if(mode) mode.value=d.mode||'parrot';
+    const txc=document.getElementById('pmr-tx-ch'); if(txc) txc.value=d.tx_channel||2;
+    const rxc=document.getElementById('pmr-rx-ch'); if(rxc) rxc.value=d.rx_channel||2;
+    const txh=document.getElementById('pmr-tx-hz'); if(txh) txh.value=d.tx_hz||0;
+    const rxh=document.getElementById('pmr-rx-hz'); if(rxh) rxh.value=d.rx_hz||0;
+    const ct=document.getElementById('pmr-ctcss'); if(ct) ct.value=d.ctcss_hz||0;
+    const hg=document.getElementById('pmr-hang'); if(hg) hg.value=d.hangtime_ms||1000;
+    const ex=document.getElementById('pmr-exclusive'); if(ex) ex.checked=d.exclusive_rf!==false;
+    const set=(id,v)=>{const el=document.getElementById(id);if(el)el.textContent=v;};
+    set('pmr-res-tx',pmrFmtHz(d.resolved_tx_hz));
+    set('pmr-res-rx',pmrFmtHz(d.resolved_rx_hz));
+    set('pmr-res-split',d.split_hz?((d.split_hz/1e3).toFixed(1)+' kHz'):'—');
+    set('pmr-rf-status',d.rf_status||'—');
+    set('pmr-tetra-status',d.tetra_paused?(t('pmr_tetra_paused')||'paused'):(t('pmr_tetra_active')||'active'));
+    const pill=document.getElementById('pmr-hero-pill');
+    const dot=document.getElementById('pmr-hero-dot');
+    const sub=document.getElementById('pmr-hero-sub');
+    if(pill){pill.textContent=d.enabled?(d.tetra_paused?'TETRA paused':(d.rf_status||'on')):'off';pill.className='pill '+(d.enabled?'pill-warn':'pill-idle');}
+    if(dot){dot.className='hero-dot '+(d.enabled?'is-warn':'is-idle');}
+    if(sub){sub.textContent=d.enabled?('TX ch'+d.tx_channel+' · RX ch'+d.rx_channel+' · '+(d.mode||'')+(d.tetra_paused?' · TETRA off':'')):'UHF · SXceiver';}
+  }catch{setPmrMsg(t('conn_error'),false);}
+}
+async function savePmr(){
+  const body={
+    enabled:!!document.getElementById('pmr-enabled')?.checked,
+    mode:document.getElementById('pmr-mode')?.value||'parrot',
+    tx_channel:parseInt(document.getElementById('pmr-tx-ch')?.value)||2,
+    rx_channel:parseInt(document.getElementById('pmr-rx-ch')?.value)||2,
+    tx_hz:parseInt(document.getElementById('pmr-tx-hz')?.value)||0,
+    rx_hz:parseInt(document.getElementById('pmr-rx-hz')?.value)||0,
+    ctcss_hz:parseFloat(document.getElementById('pmr-ctcss')?.value)||0,
+    hangtime_ms:parseInt(document.getElementById('pmr-hang')?.value)||1000,
+    exclusive_rf:!!document.getElementById('pmr-exclusive')?.checked
+  };
+  try{
+    const r=await fetch('/api/pmr-repeater',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    const txt=await r.text();
+    let d={}; try{d=JSON.parse(txt);}catch{d={message:txt};}
+    if(!r.ok){setPmrMsg(t('save_fail')+': '+(d.message||txt),false);return;}
+    setPmrMsg(d.message||t('pmr_saved')||t('saved'),true);
+    loadPmr();
+  }catch{setPmrMsg(t('conn_error'),false);}
+}
 
 // ── Telegram alerts ─────────────────────────────────────────────────────────
 let tgChats=[];            // recipient chat IDs (numbers)

@@ -4,6 +4,7 @@ pub mod dapnet;
 pub mod dual_carrier;
 pub mod geoalarm;
 pub mod html;
+pub mod pmr_repeater;
 pub mod radioid;
 pub mod server;
 pub mod snom_notify;

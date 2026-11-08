@@ -252,6 +252,39 @@ pub struct WxRuntimeOverride {
     pub periodic_interval_secs: u64,
 }
 
+/// Runtime override for `[pmr_repeater]`, edited from the dashboard switch.
+#[derive(Debug, Clone)]
+pub struct PmrRepeaterRuntimeOverride {
+    pub enabled: bool,
+    pub mode: String,
+    pub tx_channel: u8,
+    pub rx_channel: u8,
+    pub tx_hz: u32,
+    pub rx_hz: u32,
+    pub ctcss_hz: f32,
+    pub hangtime_ms: u32,
+    pub min_duplex_split_hz: u32,
+    pub exclusive_rf: bool,
+}
+
+impl Default for PmrRepeaterRuntimeOverride {
+    fn default() -> Self {
+        let base = crate::bluestation::CfgPmrRepeater::default();
+        Self {
+            enabled: base.enabled,
+            mode: base.mode,
+            tx_channel: base.tx_channel,
+            rx_channel: base.rx_channel,
+            tx_hz: base.tx_hz,
+            rx_hz: base.rx_hz,
+            ctcss_hz: base.ctcss_hz,
+            hangtime_ms: base.hangtime_ms,
+            min_duplex_split_hz: base.min_duplex_split_hz,
+            exclusive_rf: base.exclusive_rf,
+        }
+    }
+}
+
 /// Runtime override for Telegram alerts, edited from the dashboard.
 ///
 /// Mirrors the editable `[telegram_alerts]` config. When `Some`, it takes precedence over the
@@ -518,6 +551,8 @@ pub struct StackState {
     pub issi_whitelist_override: Option<Vec<u32>>,
     /// Runtime override for the WX/METAR service (dashboard toggle). See WxRuntimeOverride.
     pub wx_override: Option<WxRuntimeOverride>,
+    /// Runtime override for the PMR / UHF FM repeater (dashboard switch).
+    pub pmr_repeater_override: Option<PmrRepeaterRuntimeOverride>,
     /// Runtime override for Telegram alerts (dashboard editing). See TelegramRuntimeOverride.
     pub telegram_override: Option<TelegramRuntimeOverride>,
     /// Runtime override for DAPNET settings (dashboard editing). See DapnetRuntimeOverride.
@@ -708,6 +743,7 @@ impl Default for StackState {
             next_live_sds_id: 1,
             issi_whitelist_override: None,
             wx_override: None,
+            pmr_repeater_override: None,
             telegram_override: None,
             dapnet_override: None,
             geoalarm_override: None,

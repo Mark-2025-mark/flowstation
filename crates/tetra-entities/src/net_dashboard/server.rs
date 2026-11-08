@@ -2785,6 +2785,13 @@ fn handle_connection(
         let _ = buf.read_exact(&mut body);
         let body_str = String::from_utf8_lossy(&body);
         serve_whitelist_post(buf.into_inner(), &shared_config, &config_path, body_str.as_ref(), &cmd_tx);
+    } else if req_line.contains("GET /api/pmr-repeater") {
+        let mut s = stream;
+        drain_http_headers(&mut s);
+        serve_pmr_repeater_get(s, &shared_config);
+    } else if req_line.contains("POST /api/pmr-repeater") {
+        let (inner, body_str) = read_post_body(stream);
+        serve_pmr_repeater_post(inner, &shared_config, &config_path, &body_str);
     } else if req_line.contains("GET /api/wx") {
         let mut buf = BufReader::new(stream);
         loop {
@@ -3900,6 +3907,176 @@ fn serve_whitelist_post(
 // ---------------------------------------------------------------------------
 // WX/METAR service config (dashboard-editable). See net_dashboard::wx_service.
 // ---------------------------------------------------------------------------
+
+/// GET /api/pmr-repeater — dashboard switch + resolved PMR446 frequencies.
+fn serve_pmr_repeater_get(stream: TcpStream, shared_config: &Option<tetra_config::bluestation::SharedConfig>) {
+    let (pmr, tetra_paused) = match shared_config {
+        Some(cfg) => {
+            let pmr = cfg.effective_pmr_repeater();
+            let tetra_paused = cfg.pmr_holds_tetra_rf();
+            (pmr, tetra_paused)
+        }
+        None => (tetra_config::bluestation::CfgPmrRepeater::default(), false),
+    };
+    let tx_hz = pmr.resolved_tx_hz();
+    let rx_hz = pmr.resolved_rx_hz();
+    let split = pmr.split_hz();
+    let duplex_ok = matches!((split, pmr.mode.as_str()), (Some(s), "duplex") if s >= pmr.min_duplex_split_hz)
+        || pmr.mode != "duplex";
+    let rf_status = if !pmr.enabled {
+        "disabled"
+    } else if tetra_paused {
+        "tetra_paused_awaiting_rf_modem"
+    } else {
+        "configured_awaiting_rf_modem"
+    };
+    let body = serde_json::json!({
+        "enabled": pmr.enabled,
+        "mode": pmr.mode,
+        "tx_channel": pmr.tx_channel,
+        "rx_channel": pmr.rx_channel,
+        "tx_hz": pmr.tx_hz,
+        "rx_hz": pmr.rx_hz,
+        "resolved_tx_hz": tx_hz,
+        "resolved_rx_hz": rx_hz,
+        "split_hz": split,
+        "ctcss_hz": pmr.ctcss_hz,
+        "hangtime_ms": pmr.hangtime_ms,
+        "min_duplex_split_hz": pmr.min_duplex_split_hz,
+        "exclusive_rf": pmr.exclusive_rf,
+        "tetra_paused": tetra_paused,
+        "duplex_ok": duplex_ok,
+        // Exclusive RF mutes TETRA TX live; analog FM modem on the SXceiver is next.
+        "rf_status": rf_status,
+        "note": "Parrot = same channel store-and-forward (loro). Exclusive RF pauses TETRA TX while PMR is on."
+    });
+    http_json_response(stream, 200, &body.to_string());
+}
+
+/// POST /api/pmr-repeater — enable switch + channel mapping; persists to TOML.
+fn serve_pmr_repeater_post(
+    stream: TcpStream,
+    shared_config: &Option<tetra_config::bluestation::SharedConfig>,
+    config_path: &str,
+    body: &str,
+) {
+    use tetra_config::bluestation::sec_pmr_repeater::{CfgPmrRepeaterDto, apply_pmr_repeater_patch};
+    use tetra_config::bluestation::PmrRepeaterRuntimeOverride;
+
+    let json: serde_json::Value = match serde_json::from_str(body.trim()) {
+        Ok(v) => v,
+        Err(e) => {
+            http_response(stream, 400, &format!("Invalid JSON: {e}"));
+            return;
+        }
+    };
+    let Some(cfg) = shared_config else {
+        http_response(stream, 503, "Config not available");
+        return;
+    };
+
+    let cur = cfg.effective_pmr_repeater();
+    let as_bool = |k: &str, d: bool| json.get(k).and_then(|x| x.as_bool()).unwrap_or(d);
+    let as_u8 = |k: &str, d: u8| json.get(k).and_then(|x| x.as_u64()).map(|n| n as u8).unwrap_or(d);
+    let as_u32 = |k: &str, d: u32| json.get(k).and_then(|x| x.as_u64()).map(|n| n as u32).unwrap_or(d);
+    let as_f32 = |k: &str, d: f32| {
+        json.get(k)
+            .and_then(|x| x.as_f64().or_else(|| x.as_u64().map(|n| n as f64)))
+            .map(|n| n as f32)
+            .unwrap_or(d)
+    };
+    let mode = json
+        .get("mode")
+        .and_then(|x| x.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| cur.mode.clone());
+
+    let dto = CfgPmrRepeaterDto {
+        enabled: as_bool("enabled", cur.enabled),
+        mode,
+        tx_channel: as_u8("tx_channel", cur.tx_channel),
+        rx_channel: as_u8("rx_channel", cur.rx_channel),
+        tx_hz: as_u32("tx_hz", cur.tx_hz),
+        rx_hz: as_u32("rx_hz", cur.rx_hz),
+        ctcss_hz: as_f32("ctcss_hz", cur.ctcss_hz),
+        hangtime_ms: as_u32("hangtime_ms", cur.hangtime_ms),
+        min_duplex_split_hz: as_u32("min_duplex_split_hz", cur.min_duplex_split_hz),
+        exclusive_rf: as_bool("exclusive_rf", cur.exclusive_rf),
+        extra: Default::default(),
+    };
+
+    let patched = match apply_pmr_repeater_patch(dto) {
+        Ok(c) => c,
+        Err(e) => {
+            http_response(stream, 400, &format!("Invalid PMR setting: {e}"));
+            return;
+        }
+    };
+
+    let ov = PmrRepeaterRuntimeOverride {
+        enabled: patched.enabled,
+        mode: patched.mode.clone(),
+        tx_channel: patched.tx_channel,
+        rx_channel: patched.rx_channel,
+        tx_hz: patched.tx_hz,
+        rx_hz: patched.rx_hz,
+        ctcss_hz: patched.ctcss_hz,
+        hangtime_ms: patched.hangtime_ms,
+        min_duplex_split_hz: patched.min_duplex_split_hz,
+        exclusive_rf: patched.exclusive_rf,
+    };
+
+    let tetra_paused = ov.enabled && ov.exclusive_rf;
+    {
+        let mut state = cfg.state_write();
+        state.pmr_repeater_override = Some(ov.clone());
+    }
+    // Lock-free flag read by the Soapy TX loop every block — apply immediately.
+    cfg.set_pmr_holds_tetra_rf(tetra_paused);
+
+    if let Err(e) = crate::net_dashboard::pmr_repeater::write_pmr_repeater_to_toml(config_path, &ov) {
+        tracing::warn!("Dashboard: PMR repeater applied at runtime but failed to persist: {}", e);
+        http_response(stream, 200, "Applied at runtime; failed to write config file (check permissions)");
+        return;
+    }
+
+    let rf_status = if !ov.enabled {
+        "disabled"
+    } else if tetra_paused {
+        "tetra_paused_awaiting_rf_modem"
+    } else {
+        "configured_awaiting_rf_modem"
+    };
+    let message = if tetra_paused {
+        "Saved. TETRA TX muted (exclusive RF). Disable PMR to resume TETRA. Analog FM modem is next."
+    } else if ov.enabled {
+        "Saved. PMR on without exclusive RF — TETRA keeps transmitting. Analog FM modem is next."
+    } else {
+        "Saved. PMR off — TETRA TX resumed."
+    };
+
+    tracing::info!(
+        "Dashboard: PMR repeater updated (enabled={} mode={} tx_ch={} rx_ch={} tetra_paused={} rf={})",
+        ov.enabled,
+        ov.mode,
+        ov.tx_channel,
+        ov.rx_channel,
+        tetra_paused,
+        rf_status
+    );
+    http_json_response(
+        stream,
+        200,
+        &serde_json::json!({
+            "ok": true,
+            "message": message,
+            "tetra_paused": tetra_paused,
+            "rf_status": rf_status
+        })
+        .to_string(),
+    );
+}
 
 /// GET /api/wx — return the effective WX service settings as JSON.
 fn serve_wx_get(mut stream: TcpStream, shared_config: &Option<tetra_config::bluestation::SharedConfig>) {

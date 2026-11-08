@@ -862,3 +862,22 @@ voice_service = true
 # auth_user = "1001"
 # password = ""
 # realm = "pbx.example.com"
+
+###############################################################################
+# OPTIONAL: PMR / UHF FM repeater (SXceiver 70 cm). Dashboard → PMR Repeater.
+# Same antenna, time-separated RX then TX (never both at once).
+# Default parrot on PMR446 ch2: listen, then re-TX the recording on the same channel (loro).
+# Also: mode = "simplex_relay" with different RX/TX channels, or "duplex" with ≥100 kHz split.
+# Analog FM RF modem is a follow-up; the switch persists config today.
+
+# [pmr_repeater]
+# enabled = false
+# mode = "parrot"          # or "simplex_relay" / "duplex"
+# tx_channel = 2
+# rx_channel = 2           # same as tx for parrot
+# tx_hz = 0                # 0 = derive from channel (PMR446 table)
+# rx_hz = 0
+# ctcss_hz = 0.0
+# hangtime_ms = 1000
+# min_duplex_split_hz = 100000
+# exclusive_rf = true      # mute TETRA TX while PMR is on; disable PMR to resume TETRA
