@@ -24,9 +24,13 @@ const AUDIO_FS: f64 = 12_500.0;
 /// Refuse to record forever if someone holds PTT open.
 const MAX_RECORD_SECS: f32 = 45.0;
 /// Soft TX amplitude (full-scale would slam the SXceiver PA).
-const TX_AMPLITUDE: f32 = 0.35;
-/// Minimum recording length before a replay is worth airing (~200 ms).
-const MIN_RECORD_SAMPLES: usize = (AUDIO_FS * 0.2) as usize;
+const TX_AMPLITUDE: f32 = 0.55;
+/// Minimum recording length before a replay is worth airing (~150 ms).
+const MIN_RECORD_SAMPLES: usize = (AUDIO_FS * 0.15) as usize;
+/// Open squelch this many dB above the tracked noise floor.
+const SQUELCH_OPEN_DB: f32 = 4.0;
+/// Close squelch this many dB above the noise floor (hysteresis).
+const SQUELCH_CLOSE_DB: f32 = 1.5;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Phase {
@@ -44,9 +48,10 @@ pub struct PmrParrot {
     phase: Phase,
     /// Previous IQ for FM discriminator.
     prev: ComplexSample,
-    /// Slow magnitude EMA used as noise floor / carrier sense.
+    /// Slow magnitude EMA (linear) for logging / fallback.
     mag_ema: f32,
-    noise_ema: f32,
+    /// Noise floor in dBFS (20·log10(mag)), tracked with fast-down / slow-up.
+    noise_db: f32,
     carrier: bool,
     /// Decimation accumulator for audio.
     audio_acc: f32,
@@ -94,7 +99,7 @@ impl PmrParrot {
             phase: Phase::Listen,
             prev: ComplexSample::ZERO,
             mag_ema: 0.0,
-            noise_ema: 1e-3,
+            noise_db: -80.0,
             carrier: false,
             audio_acc: 0.0,
             audio_n: 0,
@@ -206,16 +211,19 @@ impl PmrParrot {
             }
         }
 
-        if self.last_log.elapsed() >= Duration::from_secs(15) {
-            tracing::info!(
-                "PMR parrot: phase={} carrier={} rec={} rx_blocks={} tx_blocks={} mag={:.4} noise={:.4}",
+        if self.last_log.elapsed() >= Duration::from_secs(5) {
+            let mag_db = 20.0 * self.mag_ema.max(1e-9).log10();
+            tracing::warn!(
+                "PMR parrot: phase={} carrier={} rec={} rx={} tx={} mag={:.4} ({:.1} dB) noise={:.1} dB open≥{:.1}",
                 self.phase_name(),
                 self.carrier,
                 self.recording.len(),
                 self.stats_rx_blocks,
                 self.stats_tx_blocks,
                 self.mag_ema,
-                self.noise_ema
+                mag_db,
+                self.noise_db,
+                self.noise_db + SQUELCH_OPEN_DB
             );
             self.last_log = Instant::now();
         }
@@ -252,17 +260,33 @@ impl PmrParrot {
         self.mag_ema = if self.mag_ema <= 0.0 {
             mag
         } else {
-            0.9 * self.mag_ema + 0.1 * mag
+            0.85 * self.mag_ema + 0.15 * mag
         };
+        let mag_db = 20.0 * self.mag_ema.max(1e-9).log10();
         if !self.carrier {
-            self.noise_ema = 0.98 * self.noise_ema + 0.02 * self.mag_ema.max(1e-6);
+            // Fast attack downward (track quieter noise), slow upward.
+            if mag_db < self.noise_db {
+                self.noise_db = 0.6 * self.noise_db + 0.4 * mag_db;
+            } else {
+                self.noise_db = 0.99 * self.noise_db + 0.01 * mag_db;
+            }
         }
-        let open_th = (self.noise_ema * 4.0).max(0.02);
-        let close_th = (self.noise_ema * 2.0).max(0.01);
-        if !self.carrier && self.mag_ema > open_th {
+        let open_th = self.noise_db + SQUELCH_OPEN_DB;
+        let close_th = self.noise_db + SQUELCH_CLOSE_DB;
+        let was = self.carrier;
+        if !self.carrier && mag_db >= open_th {
             self.carrier = true;
-        } else if self.carrier && self.mag_ema < close_th {
+        } else if self.carrier && mag_db < close_th {
             self.carrier = false;
+        }
+        if self.carrier != was {
+            tracing::warn!(
+                "PMR parrot: carrier {} (mag={:.4} / {:.1} dB, noise={:.1} dB)",
+                if self.carrier { "OPEN" } else { "CLOSE" },
+                self.mag_ema,
+                mag_db,
+                self.noise_db
+            );
         }
     }
 
