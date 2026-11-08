@@ -862,3 +862,22 @@ voice_service = true
 # auth_user = "1001"
 # password = ""
 # realm = "pbx.example.com"
+
+###############################################################################
+# OPTIONAL: PMR / UHF FM repeater (SXceiver 70 cm). Dashboard → PMR Repeater.
+# Default: TX = PMR446 channel 1 (talk), RX = channel 2 (listen).
+# Those channels are only 12.5 kHz apart → use mode = "simplex_relay" on one HAT.
+# Duplex needs ≥ min_duplex_split_hz (default 100 kHz) between TX and RX.
+# Analog FM RF modem is a follow-up; the switch persists config today.
+
+# [pmr_repeater]
+# enabled = false
+# mode = "simplex_relay"   # or "duplex" with wide split
+# tx_channel = 1
+# rx_channel = 2
+# tx_hz = 0                # 0 = derive from tx_channel (PMR446 table)
+# rx_hz = 0
+# ctcss_hz = 0.0
+# hangtime_ms = 1000
+# min_duplex_split_hz = 100000
+# exclusive_rf = true      # intend to pause TETRA TX when PMR is on

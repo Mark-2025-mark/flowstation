@@ -22,6 +22,9 @@ pub use sec_brew::*;
 pub mod sec_asterisk;
 pub use sec_asterisk::*;
 
+pub mod sec_pmr_repeater;
+pub use sec_pmr_repeater::*;
+
 pub mod sec_dapnet;
 pub use sec_dapnet::*;
 

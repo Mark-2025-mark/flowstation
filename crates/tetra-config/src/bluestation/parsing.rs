@@ -11,6 +11,7 @@ use crate::bluestation::{CellInfoDto, CfgControlDto, NetInfoDto, apply_control_p
 
 use super::config::{StackConfig, StackMode};
 use super::sec_asterisk::{CfgAsteriskDto, apply_asterisk_patch};
+use super::sec_pmr_repeater::{CfgPmrRepeaterDto, apply_pmr_repeater_patch};
 use super::sec_brew::{CfgBrewDto, apply_brew_patch};
 use super::sec_dapnet::{CfgDapnetDto, apply_dapnet_patch};
 use super::sec_dashboard::{CfgDashboardDto, apply_dashboard_patch};
@@ -230,6 +231,7 @@ pub fn from_toml_str(toml_str: &str) -> Result<StackConfig, Box<dyn std::error::
         cell: cell_cfg,
         brew: None,
         asterisk: apply_asterisk_patch(root.asterisk.unwrap_or_default())?,
+        pmr_repeater: apply_pmr_repeater_patch(root.pmr_repeater.unwrap_or_default())?,
         dapnet: apply_dapnet_patch(root.dapnet.unwrap_or_default())?,
         geoalarm: apply_geoalarm_patch(root.geoalarm.unwrap_or_default())?,
         tpg2200_action: apply_tpg2200_action_patch(root.tpg2200_action.unwrap_or_default())?,
@@ -306,6 +308,7 @@ struct TomlConfigRoot {
 
     brew: Option<CfgBrewDto>,
     asterisk: Option<CfgAsteriskDto>,
+    pmr_repeater: Option<CfgPmrRepeaterDto>,
     dapnet: Option<CfgDapnetDto>,
     geoalarm: Option<CfgGeoalarmDto>,
     tpg2200_action: Option<CfgTpg2200ActionDto>,

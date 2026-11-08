@@ -3,8 +3,8 @@ use std::sync::{Arc, RwLock};
 use tetra_core::freqs::FreqInfo;
 
 use crate::bluestation::{
-    CfgAsterisk, CfgCellInfo, CfgControl, CfgDapnet, CfgEmergency, CfgGeoalarm, CfgHealth, CfgNetInfo, CfgPhyIo, CfgRecovery, CfgSecurity,
-    CfgSnomNotify, CfgTpg2200Action, CfgWxService, PhyBackend, StackState,
+    CfgAsterisk, CfgCellInfo, CfgControl, CfgDapnet, CfgEmergency, CfgGeoalarm, CfgHealth, CfgNetInfo, CfgPhyIo, CfgPmrRepeater,
+    CfgRecovery, CfgSecurity, CfgSnomNotify, CfgTpg2200Action, CfgWxService, PhyBackend, StackState,
 };
 
 use super::sec_brew::CfgBrew;
@@ -77,6 +77,9 @@ pub struct StackConfig {
 
     /// Asterisk SIP/RTP bridge configuration.
     pub asterisk: CfgAsterisk,
+
+    /// Analog PMR / UHF FM repeater (SXceiver). Dashboard switch + channels.
+    pub pmr_repeater: CfgPmrRepeater,
 
     /// DAPNET inbound-message forwarding configuration.
     pub dapnet: CfgDapnet,
@@ -372,6 +375,27 @@ impl SharedConfig {
                 periodic_is_group: o.periodic_is_group,
                 periodic_icao: o.periodic_icao.clone(),
                 periodic_interval_secs: o.periodic_interval_secs,
+            }
+        } else {
+            base
+        }
+    }
+
+    /// Effective PMR repeater settings (dashboard override wins over TOML).
+    pub fn effective_pmr_repeater(&self) -> crate::bluestation::CfgPmrRepeater {
+        let base = self.cfg.pmr_repeater.clone();
+        if let Some(o) = self.state_read().pmr_repeater_override.as_ref() {
+            crate::bluestation::CfgPmrRepeater {
+                enabled: o.enabled,
+                mode: o.mode.clone(),
+                tx_channel: o.tx_channel,
+                rx_channel: o.rx_channel,
+                tx_hz: o.tx_hz,
+                rx_hz: o.rx_hz,
+                ctcss_hz: o.ctcss_hz,
+                hangtime_ms: o.hangtime_ms,
+                min_duplex_split_hz: o.min_duplex_split_hz,
+                exclusive_rf: o.exclusive_rf,
             }
         } else {
             base
