@@ -1,0 +1,359 @@
+//! PMR446 / UHF NBFM store-and-forward parrot (“loro”).
+//!
+//! While exclusive PMR holds the SXceiver, this engine:
+//! 1. Listens on one channel (default PMR446 ch2 = 446.01875 MHz)
+//! 2. Records demodulated audio while a carrier is present
+//! 3. After hangtime, re-transmits the recording on the same channel
+//!
+//! Runs on the existing PHY thread using the live Soapy streams (no second
+//! process). IQ stays at the SDR sample rate; audio is stored at ~12.5 kHz.
+
+use std::f32::consts::TAU;
+use std::time::{Duration, Instant};
+
+use tetra_config::bluestation::CfgPmrRepeater;
+use tetra_pdus::phy::traits::rxtx_dev::RxTxDevError;
+
+use super::dsp_types::*;
+use super::soapyio::SoapyIo;
+
+/// Peak FM deviation used for PMR446-class NBFM (±2.5 kHz).
+const DEVIATION_HZ: f64 = 2_500.0;
+/// Target audio storage rate (IQ is decimated down to this).
+const AUDIO_FS: f64 = 12_500.0;
+/// Refuse to record forever if someone holds PTT open.
+const MAX_RECORD_SECS: f32 = 45.0;
+/// Soft TX amplitude (full-scale would slam the SXceiver PA).
+const TX_AMPLITUDE: f32 = 0.35;
+/// Minimum recording length before a replay is worth airing (~200 ms).
+const MIN_RECORD_SAMPLES: usize = (AUDIO_FS * 0.2) as usize;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Phase {
+    Listen,
+    Record,
+    Hang,
+    Replay,
+}
+
+pub struct PmrParrot {
+    fs: f64,
+    decim: usize,
+    hangtime: Duration,
+    ctcss_hz: f32,
+    phase: Phase,
+    /// Previous IQ for FM discriminator.
+    prev: ComplexSample,
+    /// Slow magnitude EMA used as noise floor / carrier sense.
+    mag_ema: f32,
+    noise_ema: f32,
+    carrier: bool,
+    /// Decimation accumulator for audio.
+    audio_acc: f32,
+    audio_n: usize,
+    /// Recorded baseband audio at AUDIO_FS.
+    recording: Vec<f32>,
+    hang_deadline: Option<Instant>,
+    /// Replay cursor into `recording`.
+    replay_i: usize,
+    /// Continuous FM modulator phase (radians).
+    tx_phase: f64,
+    /// CTCSS oscillator phase while transmitting.
+    ctcss_phase: f64,
+    /// Scratch buffers reused every tick (avoid per-block alloc).
+    rx_scratch: Vec<ComplexSample>,
+    tx_scratch: Vec<ComplexSample>,
+    /// Block size matched to Soapy period (~1.5 ms at 600 kHz → 900).
+    block_len: usize,
+    stats_rx_blocks: u64,
+    stats_tx_blocks: u64,
+    last_log: Instant,
+}
+
+impl PmrParrot {
+    pub fn new(fs: f64, cfg: &CfgPmrRepeater) -> Self {
+        let fs = if fs.is_finite() && fs > 0.0 { fs } else { 600_000.0 };
+        let decim = ((fs / AUDIO_FS).round() as usize).max(1);
+        // Match SXceiver period ≈ 1.5 ms.
+        let block_len = ((fs * 0.0015).round() as usize).clamp(256, 4096);
+        let hangtime = Duration::from_millis(u64::from(cfg.hangtime_ms.max(100)));
+        tracing::info!(
+            "PMR parrot: fs={:.0} Hz audio≈{:.0} Hz (decim={}) hang={}ms ctcss={:.1} block={}",
+            fs,
+            fs / decim as f64,
+            decim,
+            hangtime.as_millis(),
+            cfg.ctcss_hz,
+            block_len
+        );
+        Self {
+            fs,
+            decim,
+            hangtime,
+            ctcss_hz: cfg.ctcss_hz.max(0.0),
+            phase: Phase::Listen,
+            prev: ComplexSample::ZERO,
+            mag_ema: 0.0,
+            noise_ema: 1e-3,
+            carrier: false,
+            audio_acc: 0.0,
+            audio_n: 0,
+            recording: Vec::with_capacity((AUDIO_FS * 8.0) as usize),
+            hang_deadline: None,
+            replay_i: 0,
+            tx_phase: 0.0,
+            ctcss_phase: 0.0,
+            rx_scratch: vec![ComplexSample::ZERO; block_len],
+            tx_scratch: vec![ComplexSample::ZERO; block_len],
+            block_len,
+            stats_rx_blocks: 0,
+            stats_tx_blocks: 0,
+            last_log: Instant::now(),
+        }
+    }
+
+    pub fn phase_name(&self) -> &'static str {
+        match self.phase {
+            Phase::Listen => "listen",
+            Phase::Record => "record",
+            Phase::Hang => "hang",
+            Phase::Replay => "replay",
+        }
+    }
+
+    /// One PHY tick: RX always (keeps Soapy timestamps alive); TX only while replaying.
+    pub fn tick(&mut self, sdr: &mut SoapyIo) -> Result<(), RxTxDevError> {
+        if self.rx_scratch.len() != self.block_len {
+            self.rx_scratch.resize(self.block_len, ComplexSample::ZERO);
+        }
+
+        let rx = match sdr.receive(&mut self.rx_scratch) {
+            Ok(r) => r,
+            Err(RxTxDevError::RxReadError) => {
+                // Recoverable timeout/overflow — skip this tick.
+                return Ok(());
+            }
+            Err(e) => return Err(e),
+        };
+        let n = rx.len.min(self.rx_scratch.len());
+        if n == 0 {
+            return Ok(());
+        }
+        self.stats_rx_blocks += 1;
+
+        let (mag, audio_chunk) = self.demod_block_n(n);
+        self.update_squelch(mag);
+
+        match self.phase {
+            Phase::Listen => {
+                if self.carrier {
+                    self.recording.clear();
+                    self.audio_acc = 0.0;
+                    self.audio_n = 0;
+                    self.phase = Phase::Record;
+                    tracing::info!("PMR parrot: carrier — recording");
+                    self.append_audio(&audio_chunk);
+                }
+            }
+            Phase::Record => {
+                self.append_audio(&audio_chunk);
+                let max_samp = (MAX_RECORD_SECS * (self.fs / self.decim as f64) as f32) as usize;
+                if !self.carrier || self.recording.len() >= max_samp {
+                    if self.recording.len() >= MIN_RECORD_SAMPLES {
+                        self.hang_deadline = Some(Instant::now() + self.hangtime);
+                        self.phase = Phase::Hang;
+                        tracing::info!(
+                            "PMR parrot: unkey — hang {} ms ({} audio samples)",
+                            self.hangtime.as_millis(),
+                            self.recording.len()
+                        );
+                    } else {
+                        tracing::debug!("PMR parrot: drop short take ({} samples)", self.recording.len());
+                        self.recording.clear();
+                        self.phase = Phase::Listen;
+                    }
+                }
+            }
+            Phase::Hang => {
+                // Still RX (and ignore new carriers briefly) until hang expires.
+                if self.hang_deadline.map(|d| Instant::now() >= d).unwrap_or(true) {
+                    if self.recording.len() >= MIN_RECORD_SAMPLES && sdr.tx_possible() {
+                        self.replay_i = 0;
+                        self.tx_phase = 0.0;
+                        self.ctcss_phase = 0.0;
+                        self.phase = Phase::Replay;
+                        tracing::info!("PMR parrot: replaying {} samples", self.recording.len());
+                    } else {
+                        self.recording.clear();
+                        self.phase = Phase::Listen;
+                    }
+                }
+            }
+            Phase::Replay => {
+                if !sdr.tx_possible() {
+                    // Wait for timestamp anchor.
+                    return Ok(());
+                }
+                self.modulate_tx_block(n);
+                let count = tx_schedule_count(sdr, n)?;
+                sdr.transmit(&self.tx_scratch[..n], Some(count))?;
+                self.stats_tx_blocks += 1;
+                if self.replay_i >= self.recording.len() {
+                    tracing::info!("PMR parrot: replay done — listening again");
+                    self.recording.clear();
+                    self.phase = Phase::Listen;
+                }
+            }
+        }
+
+        if self.last_log.elapsed() >= Duration::from_secs(15) {
+            tracing::info!(
+                "PMR parrot: phase={} carrier={} rec={} rx_blocks={} tx_blocks={} mag={:.4} noise={:.4}",
+                self.phase_name(),
+                self.carrier,
+                self.recording.len(),
+                self.stats_rx_blocks,
+                self.stats_tx_blocks,
+                self.mag_ema,
+                self.noise_ema
+            );
+            self.last_log = Instant::now();
+        }
+
+        Ok(())
+    }
+
+    fn demod_block_n(&mut self, n: usize) -> (f32, Vec<f32>) {
+        let mut mag_sum = 0.0f32;
+        let mut out = Vec::with_capacity(n / self.decim + 1);
+        let scale = (self.fs / (TAU as f64) / DEVIATION_HZ) as f32;
+
+        for i in 0..n {
+            let s = self.rx_scratch[i];
+            mag_sum += s.norm();
+            // Quadrature discriminator: Δφ between consecutive samples.
+            let prod = s * self.prev.conj();
+            let dphi = prod.im.atan2(prod.re);
+            self.prev = s;
+            let audio = (dphi * scale).clamp(-1.5, 1.5);
+            self.audio_acc += audio;
+            self.audio_n += 1;
+            if self.audio_n >= self.decim {
+                out.push(self.audio_acc / self.audio_n as f32);
+                self.audio_acc = 0.0;
+                self.audio_n = 0;
+            }
+        }
+        let mag = mag_sum / n.max(1) as f32;
+        (mag, out)
+    }
+
+    fn update_squelch(&mut self, mag: f32) {
+        self.mag_ema = if self.mag_ema <= 0.0 {
+            mag
+        } else {
+            0.9 * self.mag_ema + 0.1 * mag
+        };
+        if !self.carrier {
+            self.noise_ema = 0.98 * self.noise_ema + 0.02 * self.mag_ema.max(1e-6);
+        }
+        let open_th = (self.noise_ema * 4.0).max(0.02);
+        let close_th = (self.noise_ema * 2.0).max(0.01);
+        if !self.carrier && self.mag_ema > open_th {
+            self.carrier = true;
+        } else if self.carrier && self.mag_ema < close_th {
+            self.carrier = false;
+        }
+    }
+
+    fn append_audio(&mut self, chunk: &[f32]) {
+        self.recording.extend_from_slice(chunk);
+    }
+
+    fn modulate_tx_block(&mut self, n: usize) {
+        if self.tx_scratch.len() < n {
+            self.tx_scratch.resize(n, ComplexSample::ZERO);
+        }
+        let dphi_dev = TAU as f64 * DEVIATION_HZ / self.fs;
+        let ctcss = self.ctcss_hz as f64;
+        let dphi_ctcss = if ctcss > 0.0 {
+            TAU as f64 * ctcss / self.fs
+        } else {
+            0.0
+        };
+        // Audio sample duration in IQ samples.
+        let audio_step = self.decim as f64;
+
+        for i in 0..n {
+            let audio_pos = self.replay_i as f64 + (i as f64) / audio_step;
+            let ai = audio_pos as usize;
+            let audio = if ai < self.recording.len() {
+                self.recording[ai].clamp(-1.0, 1.0) as f64
+            } else {
+                0.0
+            };
+            let mut inst = dphi_dev * audio;
+            if dphi_ctcss > 0.0 {
+                // ~15% deviation for CTCSS (standard sub-audible level).
+                inst += dphi_ctcss * 0.15 * (self.ctcss_phase).sin();
+                self.ctcss_phase += dphi_ctcss;
+                if self.ctcss_phase > TAU as f64 {
+                    self.ctcss_phase -= TAU as f64;
+                }
+            }
+            self.tx_phase += inst;
+            if self.tx_phase > TAU as f64 {
+                self.tx_phase -= TAU as f64;
+            } else if self.tx_phase < -TAU as f64 {
+                self.tx_phase += TAU as f64;
+            }
+            self.tx_scratch[i] = ComplexSample::from_polar(TX_AMPLITUDE, self.tx_phase as f32);
+        }
+        // Advance audio cursor by the block's worth of audio samples.
+        let advance = (n + self.decim - 1) / self.decim;
+        self.replay_i = self.replay_i.saturating_add(advance);
+    }
+}
+
+fn tx_schedule_count(sdr: &SoapyIo, block_len: usize) -> Result<SampleCount, RxTxDevError> {
+    // Schedule slightly ahead of "now" so the write is not late.
+    let now = sdr.tx_current_count()?;
+    Ok(now + block_len as SampleCount * 4)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parrot_defaults_from_pmr_config() {
+        let cfg = CfgPmrRepeater::default();
+        let p = PmrParrot::new(600_000.0, &cfg);
+        assert_eq!(p.decim, 48);
+        assert_eq!(p.phase, Phase::Listen);
+        assert!(p.hangtime >= Duration::from_millis(100));
+    }
+
+    #[test]
+    fn discriminator_sees_tone() {
+        let cfg = CfgPmrRepeater::default();
+        let mut p = PmrParrot::new(48_000.0, &cfg);
+        // Generate a 1 kHz tone FM at 48 kHz IQ.
+        let mut iq = Vec::new();
+        let mut phase = 0.0f64;
+        let tone = 1_000.0;
+        for i in 0..4800 {
+            let t = i as f64 / 48_000.0;
+            let audio = (TAU as f64 * tone * t).sin();
+            phase += TAU as f64 * DEVIATION_HZ * audio / 48_000.0;
+            iq.push(ComplexSample::from_polar(0.5, phase as f32));
+        }
+        p.rx_scratch = iq;
+        let (mag, audio) = p.demod_block_n(4800);
+        assert!(mag > 0.1);
+        assert!(audio.len() > 50);
+        // Energy should be present in the demodulated audio.
+        let energy: f32 = audio.iter().map(|x| x * x).sum::<f32>() / audio.len() as f32;
+        assert!(energy > 0.01, "energy={energy}");
+    }
+}

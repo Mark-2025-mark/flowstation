@@ -731,6 +731,11 @@ impl CcBsSubentity {
             return None;
         }
 
+        // Speed dials expand short TETRA codes into full SIP/PSTN numbers (9+ digits).
+        if let Some(expanded) = cfg.speed_dials.get(routed) {
+            return Some(expanded.clone());
+        }
+
         if cfg.service_numbers.is_empty() {
             if !cfg.outbound_prefix.is_empty() && raw.starts_with(&cfg.outbound_prefix) {
                 return Some(routed.to_string());

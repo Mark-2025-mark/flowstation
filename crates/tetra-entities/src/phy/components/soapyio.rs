@@ -426,6 +426,43 @@ impl SoapyIo {
         self.dev.frequency(soapysdr::Direction::Tx, self.tx_ch)
     }
 
+    /// Retune RX LO while streams stay active (PMR parrot / exclusive RF).
+    pub fn set_rx_frequency(&mut self, hz: f64) -> Result<(), soapysdr::Error> {
+        if !self.rx_enabled() {
+            return Ok(());
+        }
+        soapycheck!(
+            "set RX center frequency",
+            self.dev
+                .set_frequency(soapysdr::Direction::Rx, self.rx_ch, hz, soapysdr::Args::new())
+        );
+        tracing::info!("SoapySDR: RX retuned to {:.6} MHz", hz / 1e6);
+        Ok(())
+    }
+
+    /// Retune TX LO while streams stay active (PMR parrot / exclusive RF).
+    pub fn set_tx_frequency(&mut self, hz: f64) -> Result<(), soapysdr::Error> {
+        if !self.tx_enabled() {
+            return Ok(());
+        }
+        soapycheck!(
+            "set TX center frequency",
+            self.dev
+                .set_frequency(soapysdr::Direction::Tx, self.tx_ch, hz, soapysdr::Args::new())
+        );
+        tracing::info!("SoapySDR: TX retuned to {:.6} MHz", hz / 1e6);
+        Ok(())
+    }
+
+    /// After a retune, drop the timing anchor so the next RX timestamp re-bases
+    /// sample counters (otherwise TX writes land on stale absolute times).
+    pub fn reset_timing(&mut self) {
+        self.initial_time = None;
+        self.rx_next_count = 0;
+        self.prev_time_ns = -1;
+        tracing::info!("SoapySDR: timing anchor reset after retune");
+    }
+
     pub fn rx_enabled(&self) -> bool {
         self.rx.is_some()
     }
