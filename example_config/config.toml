@@ -831,6 +831,11 @@ voice_service = true
 #   remote_port    = SIP server port (usually 5060)
 #   outbound_proxy_host/port = optional outbound proxy (leave host empty for direct)
 #   contact_host   = public IP/hostname the PBX uses to reach this Pi (NAT)
+#                    (dashboard Detect IP / auto-fill; must NOT be the PBX host)
+#   speed_dials    = map short TETRA codes (after prefix strip) → full SIP/PSTN
+#                    TETRA called_party_ssi is 24-bit (max 16777215 ≈ 8 digits), so
+#                    Spanish 9-digit mobiles cannot be dialed as raw SSI. Example:
+#                    radio dials 91601 → strip 91 → "601" → INVITE 612345678
 #
 # NOTE: SIP voice bridge is FEATURE-GATED on FlowStation. The default build does NOT
 # include it. Preferred: open the dashboard SIP Client page, fill the account, click
@@ -848,6 +853,7 @@ voice_service = true
 # register = true
 # codec = "PCMU"
 # service_numbers = ["600", "601"]
+# speed_dials = { "601" = "612345678", "100" = "912345678" }
 # rtp_port_min = 30000
 # rtp_port_max = 30100
 # bind_addr = "0.0.0.0"

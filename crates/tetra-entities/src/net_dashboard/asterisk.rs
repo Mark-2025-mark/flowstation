@@ -19,6 +19,18 @@ fn toml_escape(s: &str) -> String {
     s.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
+fn toml_speed_dials(map: &std::collections::HashMap<String, String>) -> String {
+    let mut keys: Vec<_> = map.keys().cloned().collect();
+    keys.sort();
+    keys.into_iter()
+        .map(|k| {
+            let v = map.get(&k).map(|s| s.as_str()).unwrap_or("");
+            format!("\"{}\" = \"{}\"", toml_escape(&k), toml_escape(v))
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 fn toml_string_list(items: &[String]) -> String {
     items
         .iter()
@@ -39,6 +51,7 @@ pub fn write_asterisk_to_toml(config_path: &str, cfg: &CfgAsterisk) -> std::io::
          register = {}\n\
          codec = \"{}\"\n\
          service_numbers = [{}]\n\
+         speed_dials = {{ {} }}\n\
          rtp_port_min = {}\n\
          rtp_port_max = {}\n\
          bind_addr = \"{}\"\n\
@@ -66,6 +79,7 @@ pub fn write_asterisk_to_toml(config_path: &str, cfg: &CfgAsterisk) -> std::io::
         cfg.register,
         toml_escape(&cfg.codec),
         toml_string_list(&cfg.service_numbers),
+        toml_speed_dials(&cfg.speed_dials),
         cfg.rtp_port_min,
         cfg.rtp_port_max,
         toml_escape(&cfg.bind_addr),

@@ -26,20 +26,20 @@ impl CcBsSubentity {
 
     pub(super) fn rx_network_circuit_setup_accept(&mut self, brew_uuid: uuid::Uuid) {
         if self.find_brew_individual_call(brew_uuid).is_some() {
-            tracing::info!("CMCE: Brew setup accepted uuid={}", brew_uuid);
+            tracing::info!("CMCE: network setup accepted uuid={}", brew_uuid);
         } else {
-            tracing::debug!("CMCE: Brew setup accept for unknown uuid={}", brew_uuid);
+            tracing::debug!("CMCE: network setup accept for unknown uuid={}", brew_uuid);
         }
     }
 
     pub(super) fn rx_network_circuit_setup_reject(&mut self, queue: &mut MessageQueue, brew_uuid: uuid::Uuid, cause: u8) {
         let Some((call_id, _)) = self.find_brew_individual_call(brew_uuid) else {
-            tracing::debug!("CMCE: Brew setup reject for unknown uuid={} cause={}", brew_uuid, cause);
+            tracing::debug!("CMCE: network setup reject for unknown uuid={} cause={}", brew_uuid, cause);
             return;
         };
         let mapped = DisconnectCause::try_from(cause as u64).unwrap_or(DisconnectCause::RequestedServiceNotAvailable);
         tracing::info!(
-            "CMCE: Brew setup rejected uuid={} call_id={} cause={} ({:?})",
+            "CMCE: network setup rejected uuid={} call_id={} cause={} ({:?})",
             brew_uuid,
             call_id,
             cause,
