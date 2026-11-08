@@ -23,8 +23,16 @@ const DEVIATION_HZ: f64 = 2_500.0;
 const AUDIO_FS: f64 = 12_500.0;
 /// Refuse to record forever if someone holds PTT open.
 const MAX_RECORD_SECS: f32 = 45.0;
+/// After this many seconds of recording, the next hang/replay is preceded by
+/// a double beep (simplex: heard when they unkey / when we force-cut).
+const WARN_RECORD_SECS: f32 = 40.0;
 /// Soft TX amplitude (full-scale would slam the SXceiver PA).
 const TX_AMPLITUDE: f32 = 0.45;
+/// Timeout courtesy tone.
+const BEEP_HZ: f64 = 1_000.0;
+const BEEP_ON_MS: u32 = 120;
+const BEEP_OFF_MS: u32 = 80;
+const BEEP_COUNT: u32 = 2;
 /// Minimum recording length before a replay is worth airing (~150 ms).
 const MIN_RECORD_SAMPLES: usize = (AUDIO_FS * 0.15) as usize;
 /// Open squelch this many dB above the tracked noise floor.
@@ -46,6 +54,8 @@ enum Phase {
     Listen,
     Record,
     Hang,
+    /// Double beep before replay when the take hit the time warning / max.
+    TimeoutBeep,
     Replay,
 }
 
@@ -80,6 +90,14 @@ pub struct PmrParrot {
     hang_deadline: Option<Instant>,
     /// After replay, ignore carriers until this instant.
     listen_after: Option<Instant>,
+    /// Play double-beep before replay (timeout / long take).
+    play_timeout_beep: bool,
+    /// Logged once when recording crosses WARN_RECORD_SECS.
+    warn_logged: bool,
+    /// Sample cursor while generating timeout beeps (at IQ rate).
+    beep_i: usize,
+    /// Total IQ samples for the beep pattern.
+    beep_len: usize,
     /// Replay cursor into `recording`.
     replay_i: usize,
     /// Continuous FM modulator phase (radians).
@@ -140,6 +158,10 @@ impl PmrParrot {
             recording: Vec::with_capacity((AUDIO_FS * 8.0) as usize),
             hang_deadline: None,
             listen_after: None,
+            play_timeout_beep: false,
+            warn_logged: false,
+            beep_i: 0,
+            beep_len: 0,
             replay_i: 0,
             tx_phase: 0.0,
             ctcss_phase: 0.0,
@@ -157,8 +179,23 @@ impl PmrParrot {
             Phase::Listen => "listen",
             Phase::Record => "record",
             Phase::Hang => "hang",
+            Phase::TimeoutBeep => "timeout_beep",
             Phase::Replay => "replay",
         }
+    }
+
+    fn warn_samples(&self) -> usize {
+        (WARN_RECORD_SECS * (self.fs / self.decim as f64) as f32) as usize
+    }
+
+    fn max_samples(&self) -> usize {
+        (MAX_RECORD_SECS * (self.fs / self.decim as f64) as f32) as usize
+    }
+
+    fn beep_pattern_len_iq(&self) -> usize {
+        let cycle_ms = BEEP_ON_MS + BEEP_OFF_MS;
+        let total_ms = cycle_ms * BEEP_COUNT;
+        ((self.fs * f64::from(total_ms) / 1000.0).round() as usize).max(1)
     }
 
     /// One PHY tick: RX always (keeps Soapy timestamps alive); TX only while replaying.
@@ -198,6 +235,8 @@ impl PmrParrot {
                     self.afc_raw_n = 0;
                     self.iq_lp = ComplexSample::ZERO;
                     self.iq_lp_n = 0;
+                    self.play_timeout_beep = false;
+                    self.warn_logged = false;
                     self.phase = Phase::Record;
                     tracing::info!("PMR parrot: carrier — recording");
                     self.append_audio(&audio_chunk);
@@ -205,10 +244,21 @@ impl PmrParrot {
             }
             Phase::Record => {
                 self.append_audio(&audio_chunk);
-                let max_samp = (MAX_RECORD_SECS * (self.fs / self.decim as f64) as f32) as usize;
+                let warn_samp = self.warn_samples();
+                let max_samp = self.max_samples();
+                if !self.warn_logged && self.recording.len() >= warn_samp {
+                    self.warn_logged = true;
+                    self.play_timeout_beep = true;
+                    tracing::warn!(
+                        "PMR parrot: approaching max record ({:.0}/{:.0} s) — will beep-beep before replay",
+                        WARN_RECORD_SECS,
+                        MAX_RECORD_SECS
+                    );
+                }
                 let force_end = self.recording.len() >= max_samp;
                 if !self.carrier || force_end {
                     if force_end {
+                        self.play_timeout_beep = true;
                         tracing::warn!(
                             "PMR parrot: max record length — forcing end ({} samples)",
                             self.recording.len()
@@ -225,10 +275,11 @@ impl PmrParrot {
                             0.0
                         };
                         tracing::info!(
-                            "PMR parrot: unkey — hang {} ms ({} audio samples, rx_offset≈{:.0} Hz)",
+                            "PMR parrot: unkey — hang {} ms ({} audio samples, rx_offset≈{:.0} Hz, timeout_beep={})",
                             self.hangtime.as_millis(),
                             self.recording.len(),
-                            afc_hz
+                            afc_hz,
+                            self.play_timeout_beep
                         );
                     } else {
                         tracing::debug!("PMR parrot: drop short take ({} samples)", self.recording.len());
@@ -241,15 +292,42 @@ impl PmrParrot {
                 // Ignore carriers while hanging (own TX not up yet; avoid noise takes).
                 if self.hang_deadline.map(|d| Instant::now() >= d).unwrap_or(true) {
                     if self.recording.len() >= MIN_RECORD_SAMPLES && sdr.tx_possible() {
-                        self.replay_i = 0;
                         self.tx_phase = 0.0;
                         self.ctcss_phase = 0.0;
-                        self.phase = Phase::Replay;
-                        tracing::info!("PMR parrot: replaying {} samples", self.recording.len());
+                        if self.play_timeout_beep {
+                            self.beep_i = 0;
+                            self.beep_len = self.beep_pattern_len_iq();
+                            self.phase = Phase::TimeoutBeep;
+                            tracing::warn!(
+                                "PMR parrot: timeout beep-beep ({} IQ samples) then replay",
+                                self.beep_len
+                            );
+                        } else {
+                            self.replay_i = 0;
+                            self.phase = Phase::Replay;
+                            tracing::info!("PMR parrot: replaying {} samples", self.recording.len());
+                        }
                     } else {
                         self.recording.clear();
                         self.phase = Phase::Listen;
                     }
+                }
+            }
+            Phase::TimeoutBeep => {
+                if !sdr.tx_possible() {
+                    return Ok(());
+                }
+                self.modulate_beep_block(n);
+                let count = tx_schedule_count(sdr, n)?;
+                sdr.transmit(&self.tx_scratch[..n], Some(count))?;
+                self.stats_tx_blocks += 1;
+                self.beep_i = self.beep_i.saturating_add(n);
+                if self.beep_i >= self.beep_len {
+                    self.play_timeout_beep = false;
+                    self.replay_i = 0;
+                    self.tx_phase = 0.0;
+                    self.phase = Phase::Replay;
+                    tracing::info!("PMR parrot: replaying {} samples", self.recording.len());
                 }
             }
             Phase::Replay => {
@@ -407,6 +485,35 @@ impl PmrParrot {
         }
         for s in &mut self.recording {
             *s = (*s - mean).clamp(-1.0, 1.0);
+        }
+    }
+
+    fn modulate_beep_block(&mut self, n: usize) {
+        if self.tx_scratch.len() < n {
+            self.tx_scratch.resize(n, ComplexSample::ZERO);
+        }
+        // Peak deviation for a clear courtesy tone (~1.5 kHz).
+        let tone_dev = TAU as f64 * 1_500.0 / self.fs;
+        let on_iq = ((self.fs * f64::from(BEEP_ON_MS) / 1000.0).round() as usize).max(1);
+        let off_iq = ((self.fs * f64::from(BEEP_OFF_MS) / 1000.0).round() as usize).max(1);
+        let cycle = on_iq + off_iq;
+
+        for i in 0..n {
+            let pos = self.beep_i + i;
+            let in_beep = (pos / cycle) < BEEP_COUNT as usize && (pos % cycle) < on_iq;
+            if in_beep {
+                let t = pos as f64 / self.fs;
+                let audio = (TAU as f64 * BEEP_HZ * t).sin();
+                self.tx_phase += tone_dev * audio;
+                if self.tx_phase > TAU as f64 {
+                    self.tx_phase -= TAU as f64;
+                } else if self.tx_phase < -TAU as f64 {
+                    self.tx_phase += TAU as f64;
+                }
+                self.tx_scratch[i] = ComplexSample::from_polar(TX_AMPLITUDE, self.tx_phase as f32);
+            } else {
+                self.tx_scratch[i] = ComplexSample::ZERO;
+            }
         }
     }
 
