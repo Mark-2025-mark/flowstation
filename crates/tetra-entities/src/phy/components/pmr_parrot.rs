@@ -28,9 +28,11 @@ const TX_AMPLITUDE: f32 = 0.55;
 /// Minimum recording length before a replay is worth airing (~150 ms).
 const MIN_RECORD_SAMPLES: usize = (AUDIO_FS * 0.15) as usize;
 /// Open squelch this many dB above the tracked noise floor.
-const SQUELCH_OPEN_DB: f32 = 4.0;
+const SQUELCH_OPEN_DB: f32 = 6.0;
 /// Close squelch this many dB above the noise floor (hysteresis).
-const SQUELCH_CLOSE_DB: f32 = 1.5;
+const SQUELCH_CLOSE_DB: f32 = 2.5;
+/// IQ blocks to observe before allowing carrier (learn ambient floor).
+const SQUELCH_WARMUP_BLOCKS: u32 = 400;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Phase {
@@ -52,6 +54,8 @@ pub struct PmrParrot {
     mag_ema: f32,
     /// Noise floor in dBFS (20·log10(mag)), tracked with fast-down / slow-up.
     noise_db: f32,
+    /// Blocks seen while learning the ambient floor (no opens yet).
+    squelch_warmup: u32,
     carrier: bool,
     /// Decimation accumulator for audio.
     audio_acc: f32,
@@ -99,7 +103,8 @@ impl PmrParrot {
             phase: Phase::Listen,
             prev: ComplexSample::ZERO,
             mag_ema: 0.0,
-            noise_db: -80.0,
+            noise_db: -60.0,
+            squelch_warmup: 0,
             carrier: false,
             audio_acc: 0.0,
             audio_n: 0,
@@ -163,7 +168,15 @@ impl PmrParrot {
             Phase::Record => {
                 self.append_audio(&audio_chunk);
                 let max_samp = (MAX_RECORD_SECS * (self.fs / self.decim as f64) as f32) as usize;
-                if !self.carrier || self.recording.len() >= max_samp {
+                let force_end = self.recording.len() >= max_samp;
+                if !self.carrier || force_end {
+                    if force_end {
+                        tracing::warn!(
+                            "PMR parrot: max record length — forcing end ({} samples)",
+                            self.recording.len()
+                        );
+                        self.carrier = false;
+                    }
                     if self.recording.len() >= MIN_RECORD_SAMPLES {
                         self.hang_deadline = Some(Instant::now() + self.hangtime);
                         self.phase = Phase::Hang;
@@ -263,12 +276,35 @@ impl PmrParrot {
             0.85 * self.mag_ema + 0.15 * mag
         };
         let mag_db = 20.0 * self.mag_ema.max(1e-9).log10();
-        if !self.carrier {
-            // Fast attack downward (track quieter noise), slow upward.
-            if mag_db < self.noise_db {
-                self.noise_db = 0.6 * self.noise_db + 0.4 * mag_db;
+
+        // Warm-up: learn the real ambient floor before allowing opens.
+        // On SXceiver ambient was ~-59 dB; starting at -80 made carrier stick open forever.
+        if self.squelch_warmup < SQUELCH_WARMUP_BLOCKS {
+            if self.squelch_warmup == 0 {
+                self.noise_db = mag_db;
+            } else if mag_db < self.noise_db {
+                self.noise_db = 0.5 * self.noise_db + 0.5 * mag_db;
             } else {
-                self.noise_db = 0.99 * self.noise_db + 0.01 * mag_db;
+                self.noise_db = 0.9 * self.noise_db + 0.1 * mag_db;
+            }
+            self.squelch_warmup += 1;
+            if self.squelch_warmup == SQUELCH_WARMUP_BLOCKS {
+                tracing::warn!(
+                    "PMR parrot: squelch ready — ambient≈{:.1} dB (open≥{:.1})",
+                    self.noise_db,
+                    self.noise_db + SQUELCH_OPEN_DB
+                );
+            }
+            self.carrier = false;
+            return;
+        }
+
+        if !self.carrier {
+            // Fast down / moderate up so ambient is tracked, not a stale -80 dB floor.
+            if mag_db < self.noise_db {
+                self.noise_db = 0.5 * self.noise_db + 0.5 * mag_db;
+            } else {
+                self.noise_db = 0.97 * self.noise_db + 0.03 * mag_db;
             }
         }
         let open_th = self.noise_db + SQUELCH_OPEN_DB;
