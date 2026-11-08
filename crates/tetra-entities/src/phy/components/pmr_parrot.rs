@@ -24,7 +24,7 @@ const AUDIO_FS: f64 = 12_500.0;
 /// Refuse to record forever if someone holds PTT open.
 const MAX_RECORD_SECS: f32 = 45.0;
 /// Soft TX amplitude (full-scale would slam the SXceiver PA).
-const TX_AMPLITUDE: f32 = 0.55;
+const TX_AMPLITUDE: f32 = 0.45;
 /// Minimum recording length before a replay is worth airing (~150 ms).
 const MIN_RECORD_SAMPLES: usize = (AUDIO_FS * 0.15) as usize;
 /// Open squelch this many dB above the tracked noise floor.
@@ -33,6 +33,11 @@ const SQUELCH_OPEN_DB: f32 = 6.0;
 const SQUELCH_CLOSE_DB: f32 = 2.5;
 /// IQ blocks to observe before allowing carrier (learn ambient floor).
 const SQUELCH_WARMUP_BLOCKS: u32 = 400;
+/// Audio high-pass (~300 Hz) removes discriminator DC — that DC remodulates as a
+/// constant electrical beep under the voice.
+const AUDIO_HPF_HZ: f64 = 300.0;
+/// Ignore RX carrier this long after replay (own TX bleed into RX).
+const POST_REPLAY_COOLDOWN: Duration = Duration::from_millis(750);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Phase {
@@ -60,9 +65,15 @@ pub struct PmrParrot {
     /// Decimation accumulator for audio.
     audio_acc: f32,
     audio_n: usize,
+    /// 1-pole HPF state (DC block on demod audio).
+    hpf_x1: f32,
+    hpf_y1: f32,
+    hpf_alpha: f32,
     /// Recorded baseband audio at AUDIO_FS.
     recording: Vec<f32>,
     hang_deadline: Option<Instant>,
+    /// After replay, ignore carriers until this instant.
+    listen_after: Option<Instant>,
     /// Replay cursor into `recording`.
     replay_i: usize,
     /// Continuous FM modulator phase (radians).
@@ -86,14 +97,20 @@ impl PmrParrot {
         // Match SXceiver period ≈ 1.5 ms.
         let block_len = ((fs * 0.0015).round() as usize).clamp(256, 4096);
         let hangtime = Duration::from_millis(u64::from(cfg.hangtime_ms.max(100)));
+        let audio_fs = fs / decim as f64;
+        // y[n] = α·(y[n-1] + x[n] - x[n-1]), α = RC/(RC+dt), RC = 1/(2πf)
+        let rc = 1.0 / (TAU as f64 * AUDIO_HPF_HZ);
+        let dt = 1.0 / audio_fs;
+        let hpf_alpha = (rc / (rc + dt)) as f32;
         tracing::info!(
-            "PMR parrot: fs={:.0} Hz audio≈{:.0} Hz (decim={}) hang={}ms ctcss={:.1} block={}",
+            "PMR parrot: fs={:.0} Hz audio≈{:.0} Hz (decim={}) hang={}ms ctcss={:.1} block={} hpf={:.0}Hz",
             fs,
-            fs / decim as f64,
+            audio_fs,
             decim,
             hangtime.as_millis(),
             cfg.ctcss_hz,
-            block_len
+            block_len,
+            AUDIO_HPF_HZ
         );
         Self {
             fs,
@@ -108,8 +125,12 @@ impl PmrParrot {
             carrier: false,
             audio_acc: 0.0,
             audio_n: 0,
+            hpf_x1: 0.0,
+            hpf_y1: 0.0,
+            hpf_alpha,
             recording: Vec::with_capacity((AUDIO_FS * 8.0) as usize),
             hang_deadline: None,
+            listen_after: None,
             replay_i: 0,
             tx_phase: 0.0,
             ctcss_phase: 0.0,
@@ -156,10 +177,16 @@ impl PmrParrot {
 
         match self.phase {
             Phase::Listen => {
-                if self.carrier {
+                let cooled = self
+                    .listen_after
+                    .map(|t| Instant::now() >= t)
+                    .unwrap_or(true);
+                if self.carrier && cooled {
                     self.recording.clear();
                     self.audio_acc = 0.0;
                     self.audio_n = 0;
+                    self.hpf_x1 = 0.0;
+                    self.hpf_y1 = 0.0;
                     self.phase = Phase::Record;
                     tracing::info!("PMR parrot: carrier — recording");
                     self.append_audio(&audio_chunk);
@@ -178,6 +205,7 @@ impl PmrParrot {
                         self.carrier = false;
                     }
                     if self.recording.len() >= MIN_RECORD_SAMPLES {
+                        self.normalize_recording_dc();
                         self.hang_deadline = Some(Instant::now() + self.hangtime);
                         self.phase = Phase::Hang;
                         tracing::info!(
@@ -193,7 +221,7 @@ impl PmrParrot {
                 }
             }
             Phase::Hang => {
-                // Still RX (and ignore new carriers briefly) until hang expires.
+                // Ignore carriers while hanging (own TX not up yet; avoid noise takes).
                 if self.hang_deadline.map(|d| Instant::now() >= d).unwrap_or(true) {
                     if self.recording.len() >= MIN_RECORD_SAMPLES && sdr.tx_possible() {
                         self.replay_i = 0;
@@ -219,6 +247,8 @@ impl PmrParrot {
                 if self.replay_i >= self.recording.len() {
                     tracing::info!("PMR parrot: replay done — listening again");
                     self.recording.clear();
+                    self.listen_after = Some(Instant::now() + POST_REPLAY_COOLDOWN);
+                    self.carrier = false;
                     self.phase = Phase::Listen;
                 }
             }
@@ -260,9 +290,14 @@ impl PmrParrot {
             self.audio_acc += audio;
             self.audio_n += 1;
             if self.audio_n >= self.decim {
-                out.push(self.audio_acc / self.audio_n as f32);
+                let raw = self.audio_acc / self.audio_n as f32;
                 self.audio_acc = 0.0;
                 self.audio_n = 0;
+                // DC-block: without this, LO/discriminator bias becomes a constant beep on TX.
+                let y = self.hpf_alpha * (self.hpf_y1 + raw - self.hpf_x1);
+                self.hpf_x1 = raw;
+                self.hpf_y1 = y;
+                out.push(y.clamp(-1.0, 1.0));
             }
         }
         let mag = mag_sum / n.max(1) as f32;
@@ -328,6 +363,20 @@ impl PmrParrot {
 
     fn append_audio(&mut self, chunk: &[f32]) {
         self.recording.extend_from_slice(chunk);
+    }
+
+    /// Extra safety: strip residual DC from the whole take before replay.
+    fn normalize_recording_dc(&mut self) {
+        if self.recording.is_empty() {
+            return;
+        }
+        let mean = self.recording.iter().sum::<f32>() / self.recording.len() as f32;
+        if mean.abs() < 1e-6 {
+            return;
+        }
+        for s in &mut self.recording {
+            *s = (*s - mean).clamp(-1.0, 1.0);
+        }
     }
 
     fn modulate_tx_block(&mut self, n: usize) {
